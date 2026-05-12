@@ -82,7 +82,7 @@ async def get_node(
             detail="无权访问此节点"
         )
     
-    return node
+    return node.to_dict()
 
 @router.post("/", response_model=NodeResponse)
 async def create_node(

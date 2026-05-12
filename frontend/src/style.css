@@ -1,0 +1,418 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =========================================================================
+   DiskBench Pro · 简洁工作台样式
+   设计原则：
+   - 默认浅色（长时间工作不累眼）；支持 .dark 切换到深色模式
+   - 平面化：去除毛玻璃、少用渐变、阴影克制
+   - 高对比度：文字清晰、主次分明
+   - 紧凑布局：信息密度优先
+   ========================================================================= */
+
+:root {
+  /* 亮色（默认） */
+  --bg:        #f5f6f8;     /* 页面底色 */
+  --surface:   #ffffff;     /* 卡片/面板 */
+  --surface-2: #fafbfc;     /* 次级面板（如表格头、侧边栏） */
+  --border:    #e6e8eb;     /* 分隔线 */
+  --border-2:  #f0f1f3;     /* 次级分隔线 */
+
+  --text:      #1f2328;     /* 主文字 */
+  --text-2:    #57606a;     /* 次要文字 */
+  --text-3:    #8c959f;     /* 禁用/弱提示 */
+
+  --brand:     #2563eb;     /* 主色（单一克制的蓝） */
+  --brand-hover:#1d4ed8;
+  --brand-soft:#eff4ff;     /* 品牌色弱底（选中态） */
+
+  --success:   #16a34a;
+  --success-soft:#ecfdf5;
+  --warning:   #d97706;
+  --warning-soft:#fffbeb;
+  --danger:    #dc2626;
+  --danger-soft:#fef2f2;
+  --info:      #0891b2;
+  --info-soft: #ecfeff;
+
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.04);
+  --shadow-md: 0 2px 6px rgba(0,0,0,.06);
+  --radius:    6px;
+  --radius-lg: 8px;
+}
+
+.dark {
+  --bg:        #0d1117;
+  --surface:   #161b22;
+  --surface-2: #1c2028;
+  --border:    #30363d;
+  --border-2:  #21262d;
+
+  --text:      #e6edf3;
+  --text-2:    #9ea7b3;
+  --text-3:    #6e7681;
+
+  --brand:     #3b82f6;
+  --brand-hover:#2563eb;
+  --brand-soft:rgba(59,130,246,.12);
+
+  --success-soft:rgba(22,163,74,.12);
+  --warning-soft:rgba(217,119,6,.12);
+  --danger-soft: rgba(220,38,38,.12);
+  --info-soft:   rgba(8,145,178,.12);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+               "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app { min-height: 100vh; }
+
+/* 滚动条极简化 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+
+/* ============================================================
+   卡片：一个整洁的平面容器，不叠加背景/毛玻璃
+   ============================================================ */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.card-hover {
+  transition: border-color .15s, box-shadow .15s;
+}
+.card-hover:hover {
+  border-color: var(--text-3);
+  box-shadow: var(--shadow-md);
+}
+
+.card-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.card-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.card-body { padding: 16px; }
+
+/* ============================================================
+   页面标题栏（不再用巨大 h2 ）
+   ============================================================ */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+.page-subtitle {
+  font-size: 13px;
+  color: var(--text-2);
+  margin-top: 2px;
+}
+
+/* ============================================================
+   状态标签（取消 border，只用弱底 + 文字色）
+   ============================================================ */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+}
+.tag-online,  .tag-success   { background: var(--success-soft); color: var(--success); }
+.tag-offline, .tag-danger    { background: var(--danger-soft);  color: var(--danger); }
+.tag-running, .tag-warning   { background: var(--warning-soft); color: var(--warning); }
+.tag-pending, .tag-neutral   { background: var(--border-2);     color: var(--text-2); }
+.tag-info                    { background: var(--info-soft);    color: var(--info); }
+
+/* 小圆点，用于行内状态指示 */
+.dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.dot-online  { background: var(--success); }
+.dot-offline { background: var(--danger); }
+.dot-running { background: var(--warning); }
+
+/* ============================================================
+   统计卡片（Dashboard 专用，极简）
+   ============================================================ */
+.stat {
+  padding: 16px;
+}
+.stat-label {
+  font-size: 13px;
+  color: var(--text-2);
+  margin-bottom: 6px;
+}
+.stat-value {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+  color: var(--text);
+}
+.stat-footer {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-2);
+  font-size: 12px;
+  color: var(--text-2);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ============================================================
+   表格：干净的默认样式
+   ============================================================ */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.data-table th {
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-weight: 500;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  text-align: left;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.data-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-2);
+  font-size: 14px;
+}
+.data-table tbody tr:hover { background: var(--surface-2); }
+.data-table tbody tr:last-child td { border-bottom: 0; }
+
+/* ============================================================
+   Element Plus 样式统一（仅做必要的色彩对齐）
+   ============================================================ */
+.el-button--primary {
+  --el-button-bg-color: var(--brand);
+  --el-button-border-color: var(--brand);
+  --el-button-hover-bg-color: var(--brand-hover);
+  --el-button-hover-border-color: var(--brand-hover);
+  --el-button-active-bg-color: var(--brand-hover);
+  --el-button-active-border-color: var(--brand-hover);
+}
+
+/* 对话框不再用半透明，还是用纯色 */
+.el-dialog {
+  border-radius: var(--radius-lg) !important;
+}
+
+/* ============================================================
+   动画：弱化 —— 仅保留必要的 fade-in
+   ============================================================ */
+.fade-in { animation: fadeIn .2s ease-out; }
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ============================================================
+   工具类（替换 Tailwind 重复使用的组合）
+   ============================================================ */
+.text-muted   { color: var(--text-2); }
+.text-subtle  { color: var(--text-3); }
+.text-brand   { color: var(--brand); }
+.divider      { height: 1px; background: var(--border); margin: 12px 0; }
+.flex-between { display: flex; align-items: center; justify-content: space-between; }
+
+/* 兼容原代码里的 .btn-* / .status-* 旧类名，避免一下改不完 */
+.btn-primary   { @apply px-3 py-1.5 rounded-md text-sm font-medium text-white; background: var(--brand); }
+.btn-primary:hover { background: var(--brand-hover); }
+.btn-secondary { @apply px-3 py-1.5 rounded-md text-sm font-medium; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+.btn-danger    { @apply px-3 py-1.5 rounded-md text-sm font-medium text-white; background: var(--danger); }
+
+/* ============================================================
+   兼容层：旧页面大量使用 text-white / text-slate-* / bg-slate-*
+   这类 Tailwind 暗色类，在浅色主题下对比度完全错误。
+   用高优先级选择器把这些类重定向到 CSS 变量，让旧页面无需改动
+   也能自动适配新 UI 风格。
+   ============================================================ */
+
+/* --- 文字 --- */
+.text-white,
+[class*="text-slate-100"],
+[class*="text-slate-200"] { color: var(--text) !important; }
+
+[class*="text-slate-300"],
+[class*="text-slate-400"] { color: var(--text-2) !important; }
+
+[class*="text-slate-500"],
+[class*="text-slate-600"] { color: var(--text-3) !important; }
+
+/* Tailwind 状态色旧类名 → 新状态色（弱化） */
+[class*="text-primary-300"],
+[class*="text-primary-400"],
+[class*="text-primary-500"] { color: var(--brand) !important; }
+
+[class*="text-success-300"],
+[class*="text-success-400"] { color: var(--success) !important; }
+
+[class*="text-warning-300"],
+[class*="text-warning-400"] { color: var(--warning) !important; }
+
+[class*="text-danger-300"],
+[class*="text-danger-400"],
+[class*="text-danger-500"] { color: var(--danger) !important; }
+
+[class*="text-info-300"],
+[class*="text-info-400"] { color: var(--info) !important; }
+
+/* --- 背景（带透明度后缀 /50 /30 等） --- */
+[class*="bg-slate-700"],
+[class*="bg-slate-800"],
+[class*="bg-slate-900"] { background-color: var(--surface) !important; }
+
+[class*="bg-slate-600"] { background-color: var(--surface-2) !important; }
+
+[class*="bg-primary-600/20"],
+[class*="bg-primary-500/20"] { background-color: var(--brand-soft) !important; }
+
+[class*="bg-success-600/20"],
+[class*="bg-success-900/30"] { background-color: var(--success-soft) !important; }
+
+[class*="bg-warning-600/20"],
+[class*="bg-warning-900/30"] { background-color: var(--warning-soft) !important; }
+
+[class*="bg-danger-600/20"],
+[class*="bg-danger-900/30"] { background-color: var(--danger-soft) !important; }
+
+[class*="bg-info-600/20"] { background-color: var(--info-soft) !important; }
+
+/* --- 边框 --- */
+[class*="border-slate-600"],
+[class*="border-slate-700"],
+[class*="border-slate-800"] { border-color: var(--border) !important; }
+
+[class*="border-success-700"] { border-color: var(--success) !important; }
+[class*="border-danger-700"]  { border-color: var(--danger) !important; }
+[class*="border-warning-700"] { border-color: var(--warning) !important; }
+[class*="border-primary-700"] { border-color: var(--brand) !important; }
+
+/* --- Element Plus 在旧代码里被 !bg-slate-* 覆写，这里再反向对齐 --- */
+.el-input__wrapper {
+  background: var(--surface) !important;
+  box-shadow: 0 0 0 1px var(--border) inset !important;
+}
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--brand) inset !important;
+}
+.el-input__inner { color: var(--text) !important; }
+.el-input__inner::placeholder { color: var(--text-3) !important; }
+
+.el-select-dropdown {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+}
+.el-select-dropdown__item {
+  color: var(--text) !important;
+}
+.el-select-dropdown__item:hover {
+  background: var(--surface-2) !important;
+}
+.el-select-dropdown__item.selected {
+  background: var(--brand-soft) !important;
+  color: var(--brand) !important;
+}
+
+.el-dialog {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  box-shadow: var(--shadow-md) !important;
+}
+.el-dialog__title,
+.el-dialog__body { color: var(--text) !important; }
+.el-dialog__header { border-bottom: 1px solid var(--border-2); padding-bottom: 12px; }
+
+.el-message {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text) !important;
+}
+.el-message--success { border-color: var(--success) !important; }
+.el-message--warning { border-color: var(--warning) !important; }
+.el-message--error   { border-color: var(--danger) !important; }
+
+/* Element Plus 表格适配 */
+.el-table {
+  background: var(--surface) !important;
+  color: var(--text) !important;
+}
+.el-table th.el-table__cell {
+  background: var(--surface-2) !important;
+  color: var(--text-2) !important;
+  border-bottom: 1px solid var(--border) !important;
+}
+.el-table td.el-table__cell {
+  border-bottom: 1px solid var(--border-2) !important;
+}
+.el-table tr:hover > td.el-table__cell {
+  background: var(--surface-2) !important;
+}
+.el-table__empty-text { color: var(--text-2) !important; }
+
+/* Element Plus 分页 */
+.el-pagination {
+  --el-pagination-bg-color: var(--surface) !important;
+  --el-pagination-text-color: var(--text-2);
+  --el-pagination-button-color: var(--text-2);
+  --el-pagination-hover-color: var(--brand);
+}
+
+/* --- 对旧的 .card 再精修 --- */
+.card.p-4, .card.p-6 {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+}
+
+/* 深色模式下反向映射：当 .dark 激活时，不让上面的 !important 强制回浅色 */
+.dark .text-white { color: var(--text) !important; }
+.dark [class*="bg-slate-700"],
+.dark [class*="bg-slate-800"],
+.dark [class*="bg-slate-900"] { background-color: var(--surface) !important; }
+

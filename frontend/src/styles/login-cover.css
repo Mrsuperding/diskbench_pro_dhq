@@ -1,0 +1,41 @@
+/* 让 EL 输入框、按钮完全透明玻璃 */
+.login-card .el-input__wrapper,
+.login-card .el-input__inner{
+  background: transparent !important;
+  border: 1px solid rgba(255,255,255,.25) !important;
+  color: #fff !important;
+  box-shadow: 0 0 0 1px rgba(236,72,153,.15) !important;
+}
+.login-card .el-input__inner::placeholder{
+  color: rgba(255,255,255,.55);
+}
+.login-card .el-form-item__label{
+  color: rgba(255,255,255,.85);
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+/* 登录按钮渐变 + 悬停放大 */
+.btn-login{
+  background: linear-gradient(135deg,#ec4899,#06b6d4);
+  border: 0 !important;
+  transition: transform .25s;
+}
+.btn-login:hover{
+  transform: scale(1.03);
+}
+
+/* 卡片本身玻璃 */
+.login-card{
+  background: rgba(255,255,255,.08);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255,255,255,.2);
+  box-shadow: 0 8px 32px rgba(236,72,153,.18);
+}
+
+/* 粒子动画补回 */
+@keyframes float{
+  0%   { transform: translate(0,0) rotate(0deg); }
+  50%  { transform: translate(20px,-20px) rotate(180deg); }
+  100% { transform: translate(0,0) rotate(360deg); }
+}

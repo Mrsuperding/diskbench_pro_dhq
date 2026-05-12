@@ -1,0 +1,72 @@
+# 节点测试数据
+
+valid_nodes:
+  - name: "Test Node Linux 001"
+    host: "192.168.1.101"
+    port: 22
+    os_type: "linux"
+    ssh_user: "root"
+    ssh_password: "test123"
+    description: "Linux 测试节点 1"
+
+  - name: "Test Node Linux 002"
+    host: "192.168.1.102"
+    port: 22
+    os_type: "linux"
+    ssh_user: "root"
+    ssh_password: "test123"
+    description: "Linux 测试节点 2"
+
+  - name: "Test Node Windows 001"
+    host: "192.168.1.201"
+    port: 3389
+    os_type: "windows"
+    ssh_user: "Administrator"
+    ssh_password: "test123"
+    description: "Windows 测试节点 1"
+
+invalid_nodes:
+  empty_name:
+    name: ""
+    host: "192.168.1.100"
+    port: 22
+    expected_error: "请输入节点名称"
+
+  empty_host:
+    name: "Test Node"
+    host: ""
+    port: 22
+    expected_error: "请输入主机地址"
+
+  invalid_port:
+    name: "Test Node"
+    host: "192.168.1.100"
+    port: 0
+    expected_error: "端口号无效"
+
+  invalid_port_large:
+    name: "Test Node"
+    host: "192.168.1.100"
+    port: 70000
+    expected_error: "端口号超出范围"
+
+edge_cases:
+  long_name:
+    name: "这是一个非常长的节点名称用于测试边界情况是否能够正确处理各种输入"
+    host: "192.168.1.100"
+    port: 22
+
+  special_chars_in_name:
+    name: "Node-Test_01 (Production)"
+    host: "192.168.1.100"
+    port: 22
+
+  ipv6_host:
+    name: "Test IPv6 Node"
+    host: "::1"
+    port: 22
+
+  localhost:
+    name: "Localhost Node"
+    host: "127.0.0.1"
+    port: 22

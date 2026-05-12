@@ -1,0 +1,39 @@
+# ========= Web 框架 =========
+fastapi==0.104.1
+uvicorn==0.24.0
+python-multipart==0.0.6
+aiofiles==23.2.1
+
+# ========= ORM / DB =========
+sqlalchemy==2.0.23
+alembic==1.12.1
+pymysql==1.1.0
+
+# ========= 加密 & 认证 =========
+cryptography>=41.0.7             # 用于节点凭据加密（core/crypto.py）
+passlib==1.7.4
+python-jose==3.3.0
+bcrypt==4.1.1
+
+# ========= 远程执行 & 系统采集 =========
+paramiko>=3.3                    # SSH 客户端（services/ssh_service.py）
+psutil>=5.9                      # 本机系统指标（api/monitor.py）
+
+# ========= 消息队列（可选，当前未使用但保留） =========
+redis==5.0.1
+celery==5.3.4
+
+# ========= WebSocket =========
+fastapi-socketio==0.0.10
+python-socketio==4.6.1
+python-engineio==3.14.2
+
+# ========= Pydantic =========
+pydantic[email]==2.5.0
+pydantic-settings==2.1.0
+
+# ========= HTTP 客户端 =========
+httpx==0.25.2
+
+# ========= 新增：Excel 导出 =========
+openpyxl>=3.1.2                  # 用于 services/export_service.py 生成 .xlsx 报告

@@ -1,0 +1,22 @@
+# UI Test Framework Dependencies
+# ================================
+
+# Core testing
+pytest>=7.4.0
+pytest-playwright>=0.4.0
+playwright>=1.40.0
+
+# Parallel execution
+pytest-xdist>=3.5.0
+
+# Failed test retry
+pytest-rerunfailures>=13.0
+
+# Reporting
+allure-pytest>=2.13.0
+
+# Configuration
+pyyaml>=6.0
+
+# Additional utilities
+python-dateutil>=2.8.0

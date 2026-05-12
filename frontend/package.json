@@ -1,0 +1,54 @@
+{
+  "name": "io-performance-platform-frontend",
+  "version": "1.0.0",
+  "description": "IO性能测试管理平台前端应用",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts --fix --ignore-path .gitignore",
+    "format": "prettier --write src/",
+    "deploy": "npm run build && node deploy.js",
+    "setup": "npm install && npm run dev"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "@heroicons/vue": "^2.1.1",
+    "@vueuse/core": "^10.9.0",
+    "animejs": "^3.2.1",
+    "axios": "^1.6.8",
+    "dayjs": "^1.11.10",
+    "echarts": "^5.4.3",
+    "element-plus": "^2.6.1",
+    "lodash-es": "^4.17.21",
+    "pinia": "^2.1.7",
+    "socket.io-client": "^4.7.5",
+    "vue": "^3.4.21",
+    "vue-echarts": "^6.6.1",
+    "vue-router": "^4.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.25",
+    "@typescript-eslint/eslint-plugin": "^7.1.1",
+    "@typescript-eslint/parser": "^7.1.1",
+    "@vitejs/plugin-vue": "^5.0.4",
+    "autoprefixer": "^10.4.18",
+    "eslint": "^8.57.0",
+    "eslint-plugin-vue": "^9.23.0",
+    "postcss": "^8.4.35",
+    "prettier": "^3.2.5",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.4.2",
+    "vite": "^5.1.6"
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  },
+  "browserslist": [
+    "> 1%",
+    "last 2 versions",
+    "not dead"
+  ]
+}

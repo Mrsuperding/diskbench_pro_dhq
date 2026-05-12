@@ -1,0 +1,48 @@
+# 测试环境配置
+app:
+  base_url: "http://test.diskbench.pro:3000"
+  api_url: "http://test.diskbench.pro:8000"
+  timeout: 30000
+  viewport:
+    width: 1920
+    height: 1080
+
+users:
+  admin:
+    username: "admin"
+    password: "admin123"
+    role: "admin"
+  demo:
+    username: "demo"
+    password: "demo123"
+    role: "user"
+
+wait:
+  element: 30000
+  navigation: 30000
+  response: 10000
+
+retry:
+  max_attempts: 3
+  delay: 2
+
+screenshot:
+  on_failure: true
+  full_page: true
+  directory: "test-results/screenshots"
+
+video:
+  on_failure: true
+  directory: "test-results/videos"
+
+infra_errors:
+  keywords:
+    - "Socket.IO"
+    - "xhr poll error"
+    - "TransportError"
+    - "socket.io-client"
+    - "favicon.ico"
+    - "Failed to load resource: the server responded with a status of 404"
+    - "Failed to load resource: the server responded with a status of 401"
+    - "Failed to load resource: the server responded with a status of 500"
+    - "Failed to load resource: the server responded with a status of 503"

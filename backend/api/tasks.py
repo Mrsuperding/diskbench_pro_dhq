@@ -281,6 +281,7 @@ async def start_task(
 ):
     """启动任务"""
     task = db.query(Task).filter(Task.id == task_id).first()
+    task_name = task.task_name
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -301,10 +302,12 @@ async def start_task(
             detail="任务已在运行中"
         )
     
-    if task.status == "completed":
+    # 支持重新运行已完成的任务
+    is_restart = task.status == "completed"
+    if task.status == "failed":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="任务已完成，无法重新启动"
+            detail="任务已失败，请克隆后重新创建"
         )
     
     # 更新任务状态
@@ -321,17 +324,31 @@ async def start_task(
         task_node.end_time = None
         task_node.duration = 0
     
+    # 如果是重启，清除旧的结果数据
+    if is_restart:
+        db.query(IOPerformanceData).filter(IOPerformanceData.task_id == task_id).delete()
+        db.query(IOStatData).filter(IOStatData.task_id == task_id).delete()
+        db.query(TaskLog).filter(TaskLog.task_id == task_id).delete()
+        db.commit()
+    
     db.commit()
     
+
+    
     # 记录日志
+    log_message = f"任务 {task_name} 已重新运行" if is_restart else f"任务 {task_name} 已启动"
     log_entry = TaskLog(
         task_id=task_id,
         log_level="info",
-        message=f"任务 {task.task_name} 已启动",
+        message=log_message,
         source="system"
     )
     db.add(log_entry)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     
     # 后台执行任务
     # 注意：不要把请求级 db 传给后台任务 —— 请求结束后 get_db 会关闭 session，
@@ -343,7 +360,7 @@ async def start_task(
     # WebSocket通知
     await socket_manager.broadcast_to_task(str(task_id), "task_started", {
         "task_id": task_id,
-        "task_name": task.task_name,
+        "task_name": task_name,
         "status": "running",
         "start_time": task.start_time.isoformat()
     })

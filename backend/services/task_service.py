@@ -571,7 +571,10 @@ class TaskService:
             )
             db.add(perf)
             db.commit()
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 性能数据已保存到数据库, perf_id={perf.id}")
+            # 显式refresh加载数据库生成的值（如id），避免隐式查询触发连接问题
+            db.refresh(perf)
+            perf_id_val = perf.id
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 性能数据已保存到数据库, perf_id={perf_id_val}")
 
             # 3. 保存百分位数延迟数据
             self._save_percentile_data_in_session(db, task_id, task_node_id, job)

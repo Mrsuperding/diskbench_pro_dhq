@@ -141,7 +141,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
             <div class="flex space-x-1">
               <el-button
@@ -168,6 +168,13 @@
                 @click="$router.push(`/tasks/${row.id}`)"
               >
                 详情
+              </el-button>
+              <el-button
+                type="text"
+                size="small"
+                @click="handleClone(row)"
+              >
+                克隆
               </el-button>
               <el-dropdown trigger="click">
                 <el-button type="text" size="small">
@@ -232,6 +239,34 @@
       :task="currentTask"
       :metrics="currentMetrics"
     />
+
+    <!-- 克隆任务对话框 -->
+    <el-dialog
+      v-model="showCloneDialog"
+      title="克隆任务"
+      width="500px"
+      :close-on-click-modal="false"
+    >
+      <el-form label-width="100px">
+        <el-form-item label="原任务">
+          <el-input :value="currentTask?.task_name" disabled />
+        </el-form-item>
+        <el-form-item label="新任务名称" required>
+          <el-input
+            v-model="cloneTaskName"
+            placeholder="请输入新任务名称"
+            :maxlength="200"
+            show-word-limit
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showCloneDialog = false">取消</el-button>
+        <el-button type="primary" :loading="cloneLoading" @click="confirmClone">
+          确定克隆
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -250,7 +285,8 @@ import {
   ChartBarIcon,
   PlayIcon,
   ClockIcon,
-  CheckCircleIcon
+  CheckCircleIcon,
+  DocumentDuplicateIcon
 } from '@heroicons/vue/24/outline'
 
 const tasksStore = useTasksStore()
@@ -265,6 +301,9 @@ const selectedTasks = ref([])
 const showCreateDialog = ref(false)
 const showLogsDialog = ref(false)
 const showMetricsDialog = ref(false)
+const showCloneDialog = ref(false)
+const cloneLoading = ref(false)
+const cloneTaskName = ref('')
 const currentTask = ref(null)
 const currentLogs = ref([])
 const currentMetrics = ref([])
@@ -364,6 +403,7 @@ const handleStart = async (task) => {
     await tasksStore.startTask(task.id)
   } catch (error) {
     console.error('Start error:', error)
+    ElMessage.error(error.response?.data?.detail || error.message || '启动失败')
   } finally {
     startLoading.value[task.id] = false
   }
@@ -475,6 +515,34 @@ const handleViewMetrics = async (task) => {
     showMetricsDialog.value = true
   } catch (error) {
     console.error('Get metrics error:', error)
+  }
+}
+
+// 克隆任务
+const handleClone = (task) => {
+  currentTask.value = task
+  cloneTaskName.value = `${task.task_name}_副本`
+  showCloneDialog.value = true
+}
+
+// 确认克隆
+const confirmClone = async () => {
+  if (!cloneTaskName.value.trim()) {
+    ElMessage.warning('请输入新任务名称')
+    return
+  }
+
+  cloneLoading.value = true
+  try {
+    await tasksStore.cloneTask(currentTask.value.id, { new_name: cloneTaskName.value.trim() })
+    ElMessage.success('任务克隆成功')
+    showCloneDialog.value = false
+    tasksStore.fetchTasks()
+  } catch (error) {
+    console.error('Clone error:', error)
+    ElMessage.error(error.response?.data?.detail || '克隆失败')
+  } finally {
+    cloneLoading.value = false
   }
 }
 

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from core.database import SessionLocal
 from models.task import Task, TaskNode, IOPerformanceData, IOStatData, TaskLog
-from models.task_node_partition import TaskNodePartition
+from models.task_node_partition import TaskNodePartition, TestResultPercentile
 from services.ssh_service import SSHService
 from services.init_write_service import InitWriteService
 from services.histogram_aggregator import HistogramAggregator
@@ -46,62 +46,99 @@ class TaskService:
         这里必须自己建 session
         """
         db = SessionLocal()
+        print(f"[Task {task_id}] ========== 任务开始执行 ==========")
         try:
+            print(f"[Task {task_id}] [STEP 0] 查询任务信息...")
             task = db.query(Task).filter(Task.id == task_id).first()
             if not task:
-                print(f"[Task {task_id}] task not found")
+                print(f"[Task {task_id}] [STEP 0] 错误: 任务不存在")
                 return
+
+            print(f"[Task {task_id}] [STEP 0] 任务名称: {task.task_name}, 当前状态: {task.status}")
 
             test_case = task.test_case
             if not test_case:
+                print(f"[Task {task_id}] [STEP 0] 错误: 测试用例不存在")
                 await self._log_error(db, task_id, "测试用例不存在")
                 await self._update_task_status(db, task_id, "failed")
                 return
+            print(f"[Task {task_id}] [STEP 0] 测试用例: {test_case.case_name}")
 
+            print(f"[Task {task_id}] [STEP 0] 查询任务节点配置...")
             task_nodes = db.query(TaskNode).filter(TaskNode.task_id == task_id).all()
             if not task_nodes:
+                print(f"[Task {task_id}] [STEP 0] 错误: 任务没有配置节点")
                 await self._log_error(db, task_id, "任务没有配置节点")
                 await self._update_task_status(db, task_id, "failed")
                 return
+            print(f"[Task {task_id}] [STEP 0] 找到 {len(task_nodes)} 个任务节点")
+
+            # 打印每个节点详情
+            for i, tn in enumerate(task_nodes):
+                node = tn.node
+                partition = tn.partition
+                partition_info = tn.partitions or (partition.mount_point if partition else "无分区")
+                print(f"[Task {task_id}] [STEP 0]   节点{i+1}: {node.node_name} ({node.host}), 分区: {partition_info}")
 
             self.active_tasks[task_id] = {
                 "start_time": datetime.utcnow(),
                 "should_stop": False,
             }
 
-            await self._log_info(db, task_id, f"开始执行任务: {task.task_name}")
+            print(f"[Task {task_id}] [STEP 0] 记录任务开始日志...")
+            await self._log_info(db, task_id, f"========== 开始执行任务: {task.task_name} ==========")
             await self._log_info(db, task_id, f"使用测试用例: {test_case.case_name}")
             await self._log_info(db, task_id, f"目标节点数: {len(task_nodes)}")
 
             # =============================================
             # 阶段 1: 初始化写入
             # =============================================
+            print(f"[Task {task_id}] [STEP 1] ========== 阶段1: 初始化写入 开始 ==========")
+            await self._log_info(db, task_id, "========== 阶段1: 初始化写入 ==========")
             init_service = InitWriteService(self.socket_manager)
-            await self._log_info(db, task_id, "开始初始化写入阶段...")
+            print(f"[Task {task_id}] [STEP 1] 调用 InitWriteService.execute_init_write...")
             init_results = await init_service.execute_init_write(task_id)
+            print(f"[Task {task_id}] [STEP 1] 初始化写入完成，结果: {init_results}")
 
             failed_init_count = sum(1 for v in init_results.values() if not v)
             if failed_init_count > 0:
+                print(f"[Task {task_id}] [STEP 1] 警告: {failed_init_count} 个分区初始化失败")
                 await self._log_warning(
                     db, task_id,
                     f"初始化写入完成: {len(init_results) - failed_init_count} 成功, {failed_init_count} 失败"
                 )
             else:
+                print(f"[Task {task_id}] [STEP 1] 成功: {len(init_results)} 个分区全部初始化成功")
                 await self._log_info(db, task_id, f"初始化写入完成: {len(init_results)} 个分区全部成功")
+            print(f"[Task {task_id}] [STEP 1] ========== 阶段1: 初始化写入 结束 ==========")
 
             # =============================================
             # 阶段 2: FIO 测试执行
             # =============================================
+            print(f"[Task {task_id}] [STEP 2] ========== 阶段2: FIO测试执行 开始 ==========")
+            await self._log_info(db, task_id, "========== 阶段2: FIO测试执行 ==========")
+            print(f"[Task {task_id}] [STEP 2] 创建 {len(task_nodes)} 个节点执行协程...")
 
             # 每个节点一个独立协程，各自管理自己的 db session
             coros = [
                 self._execute_node_task(task_id, tn.id) for tn in task_nodes
             ]
+            print(f"[Task {task_id}] [STEP 2] 开始并行执行所有节点测试 (asyncio.gather)...")
             await asyncio.gather(*coros, return_exceptions=True)
+            print(f"[Task {task_id}] [STEP 2] 所有节点测试协程执行完成")
 
+            # =============================================
+            # 阶段 3: 任务收尾
+            # =============================================
+            print(f"[Task {task_id}] [STEP 3] ========== 阶段3: 任务收尾 开始 ==========")
+            await self._log_info(db, task_id, "========== 阶段3: 任务收尾 ==========")
             await self._finalize_task(db, task_id)
+            print(f"[Task {task_id}] [STEP 3] ========== 任务执行完成 ==========")
 
         except Exception as e:
+            print(f"[Task {task_id}] [ERROR] 任务执行异常: {e!s}")
+            import traceback
+            traceback.print_exc()
             try:
                 await self._log_error(db, task_id, f"任务执行失败: {e!s}")
                 await self._update_task_status(db, task_id, "failed")
@@ -110,6 +147,7 @@ class TaskService:
         finally:
             self.active_tasks.pop(task_id, None)
             db.close()
+            print(f"[Task {task_id}] 任务资源已清理，Session已关闭")
 
     # --------------------------------------------------------- 单节点执行 ----
 
@@ -118,32 +156,57 @@ class TaskService:
         db = SessionLocal()
         ssh_service: Optional[SSHService] = None
         node_name = f"#{task_node_id}"
+        print(f"[Task {task_id}] [Node {task_node_id}] ========== 开始执行节点任务 ==========")
         try:
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.1] 查询 TaskNode 信息...")
             task_node = db.query(TaskNode).filter(TaskNode.id == task_node_id).first()
             if not task_node:
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.1] 错误: TaskNode 不存在")
                 return
             node = task_node.node
             partition = task_node.partition
+            # 支持多分区：优先使用 partitions 字段
+            partition_paths = task_node.partitions.split(',') if task_node.partitions else []
             test_case = task_node.task.test_case
             node_name = node.node_name
+            partition_display = task_node.partitions or (f"{partition.partition_name}({partition.mount_point})" if partition else "无分区")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.1] 节点: {node_name}, 分区: {partition_display}")
 
-            await self._log_info(db, task_id, f"开始在节点 {node_name} 上执行测试")
+            await self._log_info(db, task_id, f"========== 开始在节点 {node_name} 上执行测试 ==========")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.2] 建立 SSH 连接...")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.2]   主机: {node.host}:{node.port}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.2]   用户名: {node.username}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.2]   登录方式: {node.login_type}")
 
             # 建立 SSH 并探测系统
             ssh_service = SSHService()
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.2] 调用 SSHService.connect()...")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.2]   工具目录: {node.tool_path or '(系统默认)'}")
             ok = await ssh_service.connect(
                 host=node.host,
                 port=node.port,
                 username=node.username,
                 password=node.password,
                 private_key=node.private_key,
+                tool_path=node.tool_path,
             )
             if not ok:
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.2] 错误: SSH 连接失败!")
                 await self._log_error(db, task_id, f"节点 {node_name} SSH 连接失败")
                 await self._update_task_node_status(db, task_node_id, "failed", "SSH连接失败")
                 return
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.2] SSH 连接成功!")
 
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.3] 获取系统指纹...")
             fingerprint = ssh_service.get_system_fingerprint()
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.3] 系统信息:")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.3]   OS: {fingerprint['os_family']}/{fingerprint['distro']}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.3]   fio版本: {fingerprint['fio_version']}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.3]   iostat版本: {fingerprint['iostat_version']}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.3]   libaio: {'yes' if fingerprint['has_libaio'] else 'no'}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.3]   fio安装: {'yes' if fingerprint['has_fio'] else 'no'}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.3]   工具目录: {ssh_service.tool_path or '(系统默认)'}")
+
             await self._log_info(
                 db, task_id,
                 f"节点 {node_name} 系统指纹: "
@@ -154,6 +217,7 @@ class TaskService:
             )
 
             if not fingerprint["has_fio"]:
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.3] 错误: fio 未安装!")
                 await self._log_error(
                     db, task_id,
                     f"节点 {node_name} 未安装 fio，请执行：\n"
@@ -166,8 +230,12 @@ class TaskService:
                 return
 
             # 获取可用的 ioengine
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.4] 检查 io_engine 可用性...")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.4]   请求的io_engine: {test_case.io_engine}")
             chosen_engine = ssh_service.best_fio_ioengine(test_case.io_engine)
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.4]   实际使用的io_engine: {chosen_engine}")
             if chosen_engine != test_case.io_engine:
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.4]   警告: 不支持请求的io_engine，已切换")
                 await self._log_warning(
                     db, task_id,
                     f"节点 {node_name} 不支持 io_engine={test_case.io_engine}，"
@@ -175,47 +243,103 @@ class TaskService:
                 )
 
             # 检查挂载点、确保可写
-            if not await self._ensure_writable_mount(
-                db, task_id, ssh_service, partition.mount_point, node_name
-            ):
-                await self._update_task_node_status(
-                    db, task_node_id, "failed", f"挂载点不可写: {partition.mount_point}"
+            # 检查所有分区是否可写
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.5] 检查挂载点是否可写...")
+            for mp in partition_paths:
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.5]   检查分区: {mp}")
+                mount_ok = await self._ensure_writable_mount(
+                    db, task_id, ssh_service, mp, node_name
                 )
-                return
+                if not mount_ok:
+                    print(f"[Task {task_id}] [Node {task_node_id}] [2.5] 错误: 挂载点不可写: {mp}!")
+                    await self._update_task_node_status(
+                        db, task_node_id, "failed", f"挂载点不可写: {mp}"
+                    )
+                    return
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.5] 挂载点检查通过!")
 
-            # 测试文件路径（用 posixpath 避免重复斜杠）
-            test_filename = posixpath.normpath(
-                posixpath.join(partition.mount_point, "diskbench_fio_test.dat")
-            )
+            # 测试文件路径
+            # 重要：对于设备文件(如/dev/vdb)，直接用它作为测试文件，不能再加子路径
+            # 支持多分区：逗号分隔所有分区路径
+            if all(mount_point.startswith("/dev/") for mount_point in partition_paths):
+                # 所有分区都是设备文件，并行测试所有设备
+                test_filename = ','.join(partition_paths)
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.6] 检测到多个设备文件，并行测试: {test_filename}")
+            elif len(partition_paths) == 1:
+                # 单一分区
+                mount_point = partition_paths[0]
+                if mount_point.startswith("/dev/"):
+                    test_filename = mount_point
+                    print(f"[Task {task_id}] [Node {task_node_id}] [2.6] 检测到设备文件，使用设备本身作为测试文件: {test_filename}")
+                else:
+                    # 普通目录使用子目录
+                    test_filename = posixpath.normpath(
+                        posixpath.join(mount_point, "diskbench_fio_test.dat")
+                    )
+                    print(f"[Task {task_id}] [Node {task_node_id}] [2.6] 普通目录，使用子路径作为测试文件: {test_filename}")
+            else:
+                # 混合场景（不应该发生），使用第一个
+                mount_point = partition_paths[0]
+                test_filename = mount_point
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.6] 混合分区场景，使用: {test_filename}")
             # 远端 JSON 输出文件（避免 stderr 污染）
             output_json = f"/tmp/diskbench_{task_id}_{task_node_id}_{uuid.uuid4().hex[:8]}.json"
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.6] 准备FIO测试命令...")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.6]   测试文件: {test_filename}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.6]   JSON输出: {output_json}")
 
+            # 获取 fio 路径（优先使用工具目录）
+            fio_path = await ssh_service.get_tool_path("fio", ssh_service.tool_path)
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.6]   fio路径: {fio_path}")
+
+            # 构建 fio 命令（带 LD_LIBRARY_PATH 支持自定义库）
             fio_command = test_case.generate_fio_command(
                 filename=test_filename,
                 ioengine_override=chosen_engine,
                 output_file=output_json,
+                fio_path_override=fio_path,
             )
+            # 如果工具目录有自定义库，包装命令设置 LD_LIBRARY_PATH
+            if ssh_service.tool_path:
+                lib_path = ssh_service.get_lib_path()
+                if lib_path:
+                    fio_command = f"LD_LIBRARY_PATH={lib_path}:$LD_LIBRARY_PATH {fio_command}"
+                    print(f"[Task {task_id}] [Node {task_node_id}] [2.6]   已添加LD_LIBRARY_PATH: {lib_path}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.6] FIO完整命令: {fio_command}")
 
-            # 启动监控
+            # 启动监控（如果 partition 为 None，使用第一个分区路径）
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.7] 启动性能监控任务...")
+            monitor_target = partition if partition else type('Partition', (), {'mount_point': partition_paths[0] if partition_paths else '/dev/sda'})()
             monitor_task = asyncio.create_task(
-                self._monitor_node_performance(task_id, task_node_id, ssh_service, partition)
+                self._monitor_node_performance(task_id, task_node_id, ssh_service, monitor_target)
             )
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.7] 性能监控任务已启动")
 
             try:
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8] 开始执行FIO测试...")
                 await self._execute_fio_test(
                     db, task_id, task_node_id, ssh_service,
                     fio_command, output_json, test_filename, test_case.runtime
                 )
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8] FIO测试执行完成!")
                 await self._update_task_node_status(db, task_node_id, "completed")
                 await self._log_info(db, task_id, f"节点 {node_name} 测试完成")
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8] 节点状态已更新为completed")
             finally:
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.9] 停止性能监控任务...")
                 monitor_task.cancel()
                 try:
                     await monitor_task
                 except asyncio.CancelledError:
                     pass
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.9] 性能监控已停止")
+
+            print(f"[Task {task_id}] [Node {task_node_id}] ========== 节点任务执行完成 ==========")
 
         except Exception as e:
+            print(f"[Task {task_id}] [Node {task_node_id}] [ERROR] 节点任务异常: {e!s}")
+            import traceback
+            traceback.print_exc()
             await self._log_error(db, task_id, f"节点 {node_name} 测试失败: {e!s}")
             try:
                 await self._update_task_node_status(db, task_node_id, "failed", str(e))
@@ -223,35 +347,47 @@ class TaskService:
                 pass
         finally:
             if ssh_service:
+                print(f"[Task {task_id}] [Node {task_node_id}] 关闭SSH连接...")
                 ssh_service.close()
             db.close()
+            print(f"[Task {task_id}] [Node {task_node_id}] 节点Session已关闭")
 
     async def _ensure_writable_mount(
         self, db: Session, task_id: int, ssh_service: SSHService,
         mount_point: str, node_name: str
     ) -> bool:
-        """确保挂载点存在且可写"""
-        safe_mp = shlex.quote(mount_point)
-        # 探测：存在 + 可写
-        r = await ssh_service.execute_command(
-            f"test -d {safe_mp} && test -w {safe_mp} && echo OK || echo NO",
-            timeout=15,
-        )
-        if r.get("success") and r.get("stdout", "").strip() == "OK":
-            return True
+        """确保挂载点存在且可写
 
-        # 尝试创建
-        r = await ssh_service.execute_command(f"mkdir -p {safe_mp}", timeout=15)
-        if not r.get("success"):
+        注意：对于设备文件(如/dev/vdb)，test -d返回失败，但test -w可能成功。
+        所以这里直接检查可写性，不检查是否是目录。
+        """
+        safe_mp = shlex.quote(mount_point)
+        print(f"[Task {task_id}] [Node {node_name}] [2.5.1] 检查挂载点是否可写: {mount_point}")
+
+        # 检查是否可写（使用退出码判断）
+        # 对于设备文件如 /dev/vdb，test -w 不输出内容，需要用 ; echo $? 获取退出码
+        print(f"[Task {task_id}] [Node {node_name}] [2.5.1] 执行: test -w {safe_mp}; echo $?")
+        r = await ssh_service.execute_command(f"test -w {safe_mp}; echo $?", timeout=15)
+        stdout = r.get("stdout", "").strip()
+        print(f"[Task {task_id}] [Node {node_name}] [2.5.1] 命令结果: stdout='{stdout}'")
+
+        # 退出码为0表示可写，echo $?会输出0; 非0表示不可写
+        # 取最后一行（退出码）
+        lines = stdout.strip().split('\n')
+        exit_code = lines[-1] if lines else "1"
+        is_writable = (exit_code == "0")
+        print(f"[Task {task_id}] [Node {node_name}] [2.5.1] 退出码: {exit_code}, 可写: {is_writable}")
+
+        if not is_writable:
+            print(f"[Task {task_id}] [Node {node_name}] [2.5.1] 挂载点不可写!")
             await self._log_error(
                 db, task_id,
-                f"节点 {node_name} 无法创建挂载点 {mount_point}: {r.get('stderr', '')}"
+                f"节点 {node_name} 挂载点 {mount_point} 不可写 (exit_code={exit_code})"
             )
             return False
-        r = await ssh_service.execute_command(
-            f"test -w {safe_mp} && echo OK || echo NO", timeout=10
-        )
-        return r.get("success") and r.get("stdout", "").strip() == "OK"
+
+        print(f"[Task {task_id}] [Node {node_name}] [2.5.1] 挂载点可写检查通过!")
+        return True
 
     # ----------------------------------------------------------- FIO 执行 ----
 
@@ -273,40 +409,57 @@ class TaskService:
         - fio JSON 输出写到远端文件，读文件而非 stdout（防 stderr 污染）
         - 测试结束后清理测试文件和 JSON 文件
         """
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.1] 执行FIO测试...")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.1] FIO命令: {fio_command}")
         await self._log_info(db, task_id, f"执行FIO命令: {fio_command}")
 
         # 超时 = runtime + ramp + 缓冲
         fio_timeout = max(60, (runtime or 60) + 60)
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.1] 设置超时: {fio_timeout}秒 (runtime={runtime})")
 
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.2] 开始执行FIO命令 (这可能需要 {fio_timeout} 秒)...")
         result = await ssh_service.execute_command(fio_command, timeout=fio_timeout)
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.2] FIO命令执行完成!")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.2] 结果: success={result.get('success')}")
+        if result.get('stderr'):
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.2] stderr: {result.get('stderr')[:200]}")
 
         if not result.get("success"):
             # 即使退出码非 0，也试着读一下 JSON 文件（fio 有时中途完成但退出码怪异）
             err = result.get("stderr") or result.get("error") or "unknown"
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.2] 警告: FIO退出码异常，尝试读取JSON文件...")
             await self._log_warning(db, task_id, f"FIO 命令退出异常: {err[:500]}")
 
         # 读取远端 JSON 文件
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.3] 读取远端JSON输出文件...")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.3] 文件路径: {output_json}")
         cat_result = await ssh_service.execute_command(
             f"cat {shlex.quote(output_json)}", timeout=30
         )
         fio_json_text = cat_result.get("stdout", "").strip() if cat_result.get("success") else ""
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.3] JSON文件读取: success={cat_result.get('success')}, 内容长度={len(fio_json_text)}")
 
         # 清理远端临时文件（JSON 输出 + 测试数据文件）
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.4] 清理远端临时文件...")
         try:
+            cleanup_cmd = f"rm -f {shlex.quote(output_json)} {shlex.quote(test_filename)}"
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.4] 清理命令: {cleanup_cmd}")
             await ssh_service.execute_command(
                 f"rm -f {shlex.quote(output_json)} {shlex.quote(test_filename)}",
                 timeout=30,
             )
-        except Exception:
-            pass
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.4] 临时文件清理完成")
+        except Exception as e:
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.4] 清理临时文件失败: {e!s}")
 
         if not fio_json_text:
-            raise Exception(
-                f"FIO 执行失败，没有产生有效输出。stderr: "
-                f"{(result.get('stderr') or result.get('error', ''))[:500]}"
-            )
+            error_msg = f"FIO 执行失败，没有产生有效输出。stderr: {(result.get('stderr') or result.get('error', ''))[:500]}"
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5] 错误: {error_msg}")
+            raise Exception(error_msg)
 
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5] 开始解析FIO JSON结果...")
         await self._parse_fio_results(db, task_id, task_node_id, fio_json_text)
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5] FIO结果解析完成!")
 
     # ---------------------------------------------------------- FIO 解析 ----
 
@@ -317,14 +470,17 @@ class TaskService:
         解析 FIO JSON 输出
         关键修复：兼容 fio 2.x / 3.x 字段差异（lat vs lat_ns）
         """
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] 开始解析FIO JSON...")
         try:
             # fio 可能在 JSON 前打印 terse-output 或 debug 信息，找到第一个 { 开始解析
             brace_idx = fio_output.find("{")
             if brace_idx > 0:
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] JSON前有额外内容，跳过前{brace_idx}字符")
                 fio_output = fio_output[brace_idx:]
 
             data = json.loads(fio_output)
             jobs = data.get("jobs", [])
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] 解析到 {len(jobs)} 个job")
             if not jobs:
                 raise ValueError("fio 输出中没有 jobs")
 
@@ -349,8 +505,20 @@ class TaskService:
             nonzero = [x for x in (read_lat_us, write_lat_us) if x > 0]
             avg_lat_ms = (sum(nonzero) / len(nonzero) / 1000.0) if nonzero else 0.0
 
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 解析结果:")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   读IOPS: {read_stats.get('iops', 0):.2f}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   写IOPS: {write_stats.get('iops', 0):.2f}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   总IOPS: {total_iops:.2f}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   读带宽: {float(read_stats.get('bw', 0))/1024:.2f} MB/s")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   写带宽: {float(write_stats.get('bw', 0))/1024:.2f} MB/s")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   总带宽: {total_bw_mbs:.2f} MB/s")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   读延迟: {read_lat_us/1000:.3f} ms")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   写延迟: {write_lat_us/1000:.3f} ms")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   平均延迟: {avg_lat_ms:.3f} ms")
+
             task_node = db.query(TaskNode).filter(TaskNode.id == task_node_id).first()
             if not task_node:
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 警告: TaskNode不存在")
                 return
 
             task_node.iops = total_iops
@@ -359,6 +527,7 @@ class TaskService:
             task_node.io_ops = int(
                 (read_stats.get("total_ios") or 0) + (write_stats.get("total_ios") or 0)
             )
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 更新TaskNode数据库记录...")
 
             perf = IOPerformanceData(
                 task_node_id=task_node_id,
@@ -374,7 +543,12 @@ class TaskService:
             )
             db.add(perf)
             db.commit()
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 性能数据已保存到数据库")
 
+            # 保存百分位数延迟数据
+            await self._save_percentile_data(db, task_id, task_node_id, job)
+
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.3] 发送WebSocket性能更新...")
             await self.socket_manager.broadcast_to_task(
                 str(task_id),
                 "performance_update",
@@ -387,7 +561,11 @@ class TaskService:
                     "timestamp": datetime.utcnow().isoformat(),
                 },
             )
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.3] WebSocket通知已发送")
         except Exception as e:
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.ERROR] 解析FIO结果失败: {e!s}")
+            import traceback
+            traceback.print_exc()
             await self._log_warning(db, task_id, f"解析FIO结果失败: {e!s}")
 
     @staticmethod
@@ -441,6 +619,61 @@ class TaskService:
         if "clat" in stats:
             return float(stats["clat"].get("mean", 0))
         return 0.0
+
+    async def _save_percentile_data(self, db: Session, task_id: int, task_node_id: int, job: dict):
+        """
+        从 fio job 结果中提取百分位数延迟并保存到数据库
+        fio 的 lat_ns perc 字段包含百分位数值（如 lat_ns perc 1=5000 表示 1% 延迟 5000ns）
+        """
+        try:
+            # 支持读取和写入的百分位数据
+            for test_type in ("read", "write"):
+                stats = job.get(test_type, {}) or {}
+                lat_ns = stats.get("lat_ns", {})
+
+                if not lat_ns:
+                    continue
+
+                # fio 3.x 使用 lat_ns perc 数组，索引对应百分位
+                # fio 输出 perc 数组示例: [5000, 10000, 25000, 50000, 95000, 99000, 99900, 99990, 99999, 999999]
+                # 对应百分位: 1%, 50%, 75%, 90%, 95%, 99%, 99.9%, 99.99%, 99.999%, 100%
+                perc_values = lat_ns.get("perc", [])
+
+                # 定义要保存的百分位数
+                # perc_index 0=1%, 1=50%, 2=75%, 3=90%, 4=95%, 5=99%, 6=99.9%, 7=99.99%, 8=99.999%
+                percentile_mapping = {
+                    "p1": 0, "p50": 1, "p75": 2, "p90": 3, "p95": 4,
+                    "p99": 5, "p999": 6, "p9999": 7, "p99999": 8
+                }
+
+                for name, idx in percentile_mapping.items():
+                    if idx < len(perc_values):
+                        latency_us = float(perc_values[idx])
+
+                        # 检查是否已存在
+                        existing = db.query(TestResultPercentile).filter(
+                            TestResultPercentile.task_node_id == task_node_id,
+                            TestResultPercentile.percentile_name == name,
+                            TestResultPercentile.test_type == test_type
+                        ).first()
+
+                        if existing:
+                            existing.latency_us = latency_us
+                        else:
+                            percentile = TestResultPercentile(
+                                task_node_id=task_node_id,
+                                percentile_name=name,
+                                latency_us=latency_us,
+                                test_type=test_type
+                            )
+                            db.add(percentile)
+
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type} 百分位延迟已保存")
+
+            db.commit()
+        except Exception as e:
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] 保存百分位延迟失败: {e!s}")
+            db.rollback()
 
     # -------------------------------------------------------- 性能监控采集 ----
 
@@ -513,21 +746,37 @@ class TaskService:
     # ------------------------------------------------- 任务收尾 & 日志工具 ----
 
     async def _finalize_task(self, db: Session, task_id: int):
+        print(f"[Task {task_id}] [STEP 3.1] 开始任务收尾处理...")
         task = db.query(Task).filter(Task.id == task_id).first()
         if not task:
+            print(f"[Task {task_id}] [STEP 3.1] 错误: 任务不存在")
             return
+        print(f"[Task {task_id}] [STEP 3.1] 任务: {task.task_name}")
+
         task_nodes = db.query(TaskNode).filter(TaskNode.task_id == task_id).all()
+        print(f"[Task {task_id}] [STEP 3.2] 查询到 {len(task_nodes)} 个任务节点")
 
         total_iops = total_lat = total_bw = 0.0
         total_io_ops = 0
         completed = 0
+        print(f"[Task {task_id}] [STEP 3.3] 汇总各节点结果:")
         for tn in task_nodes:
+            node_name = tn.node.node_name if tn.node else "unknown"
+            print(f"[Task {task_id}] [STEP 3.3]   节点: {node_name}, 状态: {tn.status}, IOPS: {tn.iops}, 带宽: {tn.bandwidth}, 延迟: {tn.latency}")
             if tn.status == "completed":
                 total_iops += float(tn.iops or 0)
                 total_lat += float(tn.latency or 0)
                 total_bw += float(tn.bandwidth or 0)
                 total_io_ops += int(tn.io_ops or 0)
                 completed += 1
+
+        print(f"[Task {task_id}] [STEP 3.4] 汇总结果:")
+        print(f"[Task {task_id}] [STEP 3.4]   完成节点数: {completed}/{len(task_nodes)}")
+        print(f"[Task {task_id}] [STEP 3.4]   总IOPS: {total_iops:.2f}")
+        print(f"[Task {task_id}] [STEP 3.4]   平均IOPS: {total_iops/completed if completed > 0 else 0:.2f}")
+        print(f"[Task {task_id}] [STEP 3.4]   平均延迟: {total_lat/completed if completed > 0 else 0:.2f} ms")
+        print(f"[Task {task_id}] [STEP 3.4]   平均带宽: {total_bw/completed if completed > 0 else 0:.2f} MB/s")
+        print(f"[Task {task_id}] [STEP 3.4]   总IO操作数: {total_io_ops}")
 
         task.end_time = datetime.utcnow()
         task.duration = (
@@ -541,18 +790,34 @@ class TaskService:
 
         failed = sum(1 for t in task_nodes if t.status == "failed")
         cancelled = sum(1 for t in task_nodes if t.status == "cancelled")
+        print(f"[Task {task_id}] [STEP 3.5] 确定最终状态: failed={failed}, cancelled={cancelled}")
+
         if failed == len(task_nodes):
             task.status = "failed"
+            print(f"[Task {task_id}] [STEP 3.5] 最终状态: failed (全部节点失败)")
         elif cancelled > 0:
             task.status = "cancelled"
+            print(f"[Task {task_id}] [STEP 3.5] 最终状态: cancelled (有节点取消)")
         else:
             task.status = "completed"
+            print(f"[Task {task_id}] [STEP 3.5] 最终状态: completed")
 
+        print(f"[Task {task_id}] [STEP 3.5] 任务持续时间: {task.duration} 秒")
         db.commit()
+        print(f"[Task {task_id}] [STEP 3.5] 数据库已提交")
 
+        print(f"[Task {task_id}] [STEP 3.6] 记录任务完成日志...")
         await self._log_info(
-            db, task_id, f"任务 {task.task_name} 执行完成，状态: {task.status}"
+            db, task_id, f"========== 任务 {task.task_name} 执行完成，状态: {task.status} =========="
         )
+        await self._log_info(
+            db, task_id, f"汇总结果 - 平均IOPS: {total_iops/completed if completed > 0 else 0:.2f}, "
+            f"平均延迟: {total_lat/completed if completed > 0 else 0:.2f}ms, "
+            f"平均带宽: {total_bw/completed if completed > 0 else 0:.2f}MB/s, "
+            f"总耗时: {task.duration}秒"
+        )
+
+        print(f"[Task {task_id}] [STEP 3.7] 发送任务完成WebSocket通知...")
         await self.socket_manager.broadcast_to_task(
             str(task_id), "task_completed",
             {
@@ -564,6 +829,8 @@ class TaskService:
                 "end_time": task.end_time.isoformat(),
             },
         )
+        print(f"[Task {task_id}] [STEP 3.7] WebSocket通知已发送")
+        print(f"[Task {task_id}] [STEP 3] ========== 任务收尾完成 ==========")
 
     async def _update_task_status(self, db: Session, task_id: int, status: str):
         task = db.query(Task).filter(Task.id == task_id).first()

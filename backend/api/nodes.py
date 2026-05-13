@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import paramiko
@@ -115,8 +115,8 @@ async def create_node(
     db.add(db_node)
     db.commit()
     db.refresh(db_node)
-    
-    return db_node
+
+    return db_node.to_dict()
 
 @router.put("/{node_id}", response_model=NodeResponse)
 async def update_node(
@@ -147,8 +147,8 @@ async def update_node(
     
     db.commit()
     db.refresh(node)
-    
-    return node
+
+    return node.to_dict()
 
 @router.delete("/{node_id}")
 async def delete_node(
@@ -518,3 +518,231 @@ async def sync_node_partitions(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"同步失败: {str(e)}"
         )
+
+@router.post("/{node_id}/upload-tools")
+async def upload_tools(
+    node_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """上传工具到节点"""
+    from fastapi import UploadFile, File
+    import os
+    import tempfile
+
+    node = db.query(Node).filter(Node.id == node_id).first()
+    if not node:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="节点不存在"
+        )
+
+    # 权限检查
+    if current_user.role != "admin" and node.created_by != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权操作此节点"
+        )
+
+    # 如果没有设置 tool_path，返回错误
+    if not node.tool_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请先在节点配置中设置工具目录路径 (tool_path)"
+        )
+
+    try:
+        ssh_service = SSHService()
+        is_connected = await ssh_service.connect(
+            host=node.host,
+            port=node.port,
+            username=node.username,
+            password=node.password,
+            private_key=node.private_key
+        )
+
+        if not is_connected:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="无法连接到节点"
+            )
+
+        # 确保远程工具目录存在
+        await ssh_service.ensure_dir_exists(node.tool_path)
+
+        return {
+            "message": "工具上传功能已就绪，请使用文件上传接口",
+            "tool_path": node.tool_path
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"连接失败: {str(e)}"
+        )
+    finally:
+        ssh_service.close()
+
+
+@router.post("/{node_id}/upload-tool-bundle")
+async def upload_tool_bundle(
+    node_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    上传工具包到节点（支持包含 fio 和依赖库的压缩包）
+    压缩包格式：.tar.gz, .tgz, .zip
+    自动解压到节点的 tool_path 目录
+    """
+    import os
+    import tempfile
+    import tarfile
+    import zipfile
+    import shutil
+
+    node = db.query(Node).filter(Node.id == node_id).first()
+    if not node:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="节点不存在")
+
+    if current_user.role != "admin" and node.created_by != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作此节点")
+
+    if not node.tool_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请先在节点配置中设置工具目录路径 (tool_path)"
+        )
+
+    try:
+        ssh_service = SSHService()
+        if not await ssh_service.connect(
+            host=node.host, port=node.port,
+            username=node.username, password=node.password,
+            private_key=node.private_key, tool_path=node.tool_path
+        ):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无法连接到节点")
+
+        # 确保远程目录存在
+        await ssh_service.ensure_dir_exists(node.tool_path)
+
+        # 保存上传的文件到临时目录
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp_file:
+            content = await file.read()
+            tmp_file.write(content)
+            tmp_path = tmp_file.name
+
+        try:
+            # 解压到临时目录
+            extract_dir = tempfile.mkdtemp()
+            if file.filename.endswith(('.tar.gz', '.tgz')):
+                with tarfile.open(tmp_path, 'r:gz') as tar:
+                    tar.extractall(extract_dir)
+            elif file.filename.endswith('.zip'):
+                with zipfile.ZipFile(tmp_path, 'r') as zf:
+                    zf.extractall(extract_dir)
+            else:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="不支持的压缩格式，请使用 .tar.gz, .tgz 或 .zip")
+
+            # 递归上传到远程
+            success = await ssh_service.upload_dir(extract_dir, node.tool_path)
+            if not success:
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="上传失败")
+
+            # 尝试配置 LD_LIBRARY_PATH
+            await ssh_service.configure_ld_library_path()
+
+            return {
+                "message": "工具包上传并解压成功",
+                "tool_path": node.tool_path,
+                "file": file.filename
+            }
+        finally:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            os.unlink(tmp_path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"上传失败: {str(e)}")
+    finally:
+        ssh_service.close()
+
+
+@router.post("/{node_id}/upload-libs")
+async def upload_libs(
+    node_id: int,
+    files: List[UploadFile] = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    上传依赖库文件到节点的 lib 目录
+    用于离线环境上传 libaio.so.1 等库文件
+    """
+    import os
+    import tempfile
+
+    node = db.query(Node).filter(Node.id == node_id).first()
+    if not node:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="节点不存在")
+
+    if current_user.role != "admin" and node.created_by != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作此节点")
+
+    if not node.tool_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请先在节点配置中设置工具目录路径 (tool_path)"
+        )
+
+    try:
+        ssh_service = SSHService()
+        if not await ssh_service.connect(
+            host=node.host, port=node.port,
+            username=node.username, password=node.password,
+            private_key=node.private_key, tool_path=node.tool_path
+        ):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="无法连接到节点")
+
+        # 创建 lib 子目录
+        lib_dir = os.path.join(node.tool_path, "lib")
+        await ssh_service.ensure_dir_exists(lib_dir)
+
+        uploaded = []
+        for file in files:
+            if not file.filename.endswith('.so'):
+                continue  # 跳过非库文件
+
+            # 保存到临时文件
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.so') as tmp_file:
+                content = await file.read()
+                tmp_file.write(content)
+                tmp_path = tmp_file.name
+
+            try:
+                remote_path = os.path.join(lib_dir, os.path.basename(file.filename))
+                success = await ssh_service.upload_file(tmp_path, remote_path)
+                if success:
+                    uploaded.append(file.filename)
+                    # 设置可执行权限
+                    await ssh_service.execute_command(f"chmod 755 {remote_path}", timeout=10)
+            finally:
+                os.unlink(tmp_path)
+
+        # 配置 LD_LIBRARY_PATH
+        await ssh_service.configure_ld_library_path()
+
+        return {
+            "message": f"成功上传 {len(uploaded)} 个库文件",
+            "uploaded": uploaded,
+            "lib_path": lib_dir
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"上传失败: {str(e)}")
+    finally:
+        ssh_service.close()

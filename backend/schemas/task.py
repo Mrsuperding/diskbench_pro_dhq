@@ -72,10 +72,12 @@ class TaskNodeCreate(TaskNodeBase):
 class TaskNodeUpdate(BaseModel):
     status: Optional[str] = None
     error_message: Optional[str] = None
+    partition_path: Optional[str] = None  # 逗号分隔的分区路径，用于更新分区
 
 class TaskNodeResponse(TaskNodeBase):
     id: int
     task_id: int
+    partitions: str = ""  # 逗号分隔的分区路径
     status: str
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None

@@ -34,7 +34,6 @@ const routes = [
 
       // 资源
       { path: 'nodes', component: () => import('@views/nodes/Index.vue'), meta: { title: '节点' } },
-      { path: 'nodes/:id', component: () => import('@views/nodes/Detail.vue'), meta: { title: '节点详情' } },
       { path: 'cases', component: () => import('@views/cases/Index.vue'), meta: { title: '用例' } },
       { path: 'cases/:id', component: () => import('@views/cases/Detail.vue'), meta: { title: '用例详情' } },
 

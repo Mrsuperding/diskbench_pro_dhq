@@ -10,6 +10,7 @@ class NodeBase(BaseModel):
     username: str
     os_type: Optional[str] = None
     is_public: bool = False
+    tool_path: Optional[str] = None
     
     @validator('node_name')
     def validate_node_name(cls, v):
@@ -62,6 +63,7 @@ class NodeUpdate(BaseModel):
     private_key: Optional[str] = None
     os_type: Optional[str] = None
     is_public: Optional[bool] = None
+    tool_path: Optional[str] = None
 
 class NodeResponse(BaseModel):
     id: int
@@ -77,6 +79,7 @@ class NodeResponse(BaseModel):
     disk_info: Optional[str] = None
     created_by: Optional[int] = None
     is_public: bool
+    tool_path: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     partitions: List[dict] = []
@@ -95,6 +98,7 @@ class NodeListResponse(BaseModel):
     memory_info: Optional[str] = None
     created_by: Optional[int] = None
     is_public: bool
+    tool_path: Optional[str] = None
     created_at: datetime
     partition_count: int = 0
     

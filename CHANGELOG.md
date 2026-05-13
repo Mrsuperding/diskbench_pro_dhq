@@ -1,121 +1,230 @@
-# DiskBench Pro · 变更总览
+# CHANGELOG - 2026-05-13
 
-本版本基于原项目在以下方面做了系统性改进，全部改动都已合并到源码里。
+## 概述
 
-## 📚 详细文档
+本次更新包含以下主要改进：
+1. 任务节点分区支持多分区合并显示
+2. 修复任务执行时分区数据为空导致的错误
+3. 节点管理增强（编辑功能、工具目录支持）
+4. Docker 部署支持
+5. 克隆任务时复制分区信息
 
-| 文档 | 说明 |
-|------|------|
-| `BUG_FIX_REPORT.md`      | 30+ 个 bug 的修复清单（FIO 跨系统、SSH 执行、iostat 解析、DB 会话等） |
-| `NEW_FEATURES.md`        | 新增的 10 项能力：调度/基准/告警/审计/运行批次/数据导出/健康检查/保留策略/加密/错误处理 |
-| `TIME_WINDOW_FEATURE.md` | 性能抖动图的时间窗格滑动查看功能 |
-| `UI_REDESIGN.md`         | UI 简化：浅色工作台风格、原子组件、旧类名兼容层 |
+---
 
-## 🚀 快速启动
+## 1. 数据模型变更
 
-### 后端
-```bash
-cd backend
-pip install -r requirements.txt
+### backend/models/task.py
 
-# 生产环境必做：设置加密密钥
-export DISKBENCH_SECRET_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
-
-python main.py
-```
-
-### 前端
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-## 📦 新增的 API 速览
-
-```
-# 调度
-POST/GET/DELETE /api/schedules          /api/schedules/{id}/enable
-
-# 基准
-POST/GET/DELETE /api/baselines
-GET /api/tasks/{id}/baseline-compare
-GET /api/test-cases/{id}/trend
-
-# 导出
-GET /api/tasks/{id}/export/metrics.csv
-GET /api/tasks/{id}/export/iostat.csv
-GET /api/tasks/{id}/export/report.xlsx
-GET /api/tasks/export/compare.csv?task_ids=1&task_ids=2
-
-# 节点健康
-POST /api/nodes/{id}/health-check
-
-# 审计
-GET/DELETE /api/audit-logs
-
-# 告警
-POST/GET/DELETE /api/alert-rules           /api/alert-rules/{id}/enable
-GET /api/alert-events
-
-# 运行批次
-POST/GET /api/run-batches                   GET /api/run-batches/{id}
-
-# 数据保留
-POST /api/retention/run-now
-```
-
-## 📋 后端新增的 Python 包
-
-在 `backend/requirements.txt` 中已经追加：
-- `paramiko>=3.3`（原来漏了）
-- `psutil>=5.9`（原来漏了）
-- `openpyxl>=3.1.2`（导出 Excel 用）
-- `cryptography>=41`（加密凭据用）
-
-## 🎨 前端新增页面
-
-- `/schedules`    定时调度
-- `/baselines`    性能基准
-- `/alerts`       告警
-- `/run-batches`  运行批次
-- `/audit-logs`   审计日志
-
-路由已在 `frontend/src/router/index.js` 中注册完毕。
-
-## ⚠️ 需要你手动确认的一点
-
-前端监控页（TaskMetricsDialog 和 monitor/Index.vue）会调用：
-```
-GET /api/tasks/{id}/metrics?limit=600
-```
-这个接口在原后端 `api/tasks.py` 中**可能尚未实现**。如果前端抖动图拉不到数据，按下面示例在 `api/tasks.py` 里补一个即可：
-
+**TaskNode 模型新增 `partitions` 字段**：
 ```python
-from models.task import IOPerformanceData, TaskNode
-
-@router.get("/{task_id}/metrics")
-async def get_task_metrics(
-    task_id: int,
-    limit: int = 120,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    rows = (
-        db.query(IOPerformanceData)
-        .join(TaskNode, IOPerformanceData.task_node_id == TaskNode.id)
-        .filter(TaskNode.task_id == task_id)
-        .order_by(IOPerformanceData.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
-    return [r.to_dict() for r in reversed(rows)]
+# 支持多个分区：逗号分隔的分区路径
+partitions = Column(Text, nullable=True)
 ```
 
-## 🗃️ 数据库
+**TaskNode.to_dict() 更新**：
+```python
+"partitions": self.partitions or "",
+```
 
-- 启动时 `Base.metadata.create_all(...)` 会自动创建新增的表：
-  - `scheduled_tasks`、`performance_baselines`、`audit_logs`、`alert_rules`、`alert_events`、`run_batches`、`run_batch_items`
-- 节点的 `password`/`private_key` 字段已改为加密存储
-  - **已有的明文数据兼容**（没有 `ENC:v1:` 前缀的会按明文对待）
-  - 建议运行一次迁移脚本把旧数据也加密：`UPDATE nodes SET password = password` 会触发 ORM 重新加密（或写个简单 Python 脚本遍历 nodes 重存）
+### backend/models/node.py
+
+**Node 模型新增 `tool_path` 字段**：
+```python
+tool_path = Column(String(500), nullable=True, comment="工具目录路径")
+```
+
+### database-schema.sql
+
+```sql
+ALTER TABLE task_nodes ADD COLUMN partitions TEXT NULL;
+ALTER TABLE task_nodes MODIFY COLUMN partition_id INT NULL;
+```
+
+---
+
+## 2. API 变更
+
+### backend/api/tasks.py
+
+#### get_task 预加载优化
+```python
+task = db.query(Task).options(
+    joinedload(Task.test_case),
+    selectinload(Task.task_nodes).joinedload(TaskNode.node),
+    selectinload(Task.task_nodes).joinedload(TaskNode.partition)
+).filter(Task.id == task_id).first()
+```
+
+#### add_task_node 合并逻辑
+同一个节点添加多次时，合并分区到同一个 TaskNode：
+```python
+existing = db.query(TaskNode).filter(
+    TaskNode.task_id == task_id,
+    TaskNode.node_id == task_node_data.node_id
+).first()
+if existing:
+    existing.partitions = ','.join(partition_paths)
+    # ... 更新状态等
+else:
+    db_task_node = TaskNode(
+        task_id=task_id,
+        node_id=task_node_data.node_id,
+        partition_id=placeholder_partition.id,
+        partitions=','.join(partition_paths)
+    )
+```
+
+#### clone_task 克隆分区信息
+```python
+cloned_task_node = TaskNode(
+    task_id=cloned_task.id,
+    node_id=task_node.node_id,
+    partition_id=task_node.partition_id,
+    partitions=task_node.partitions  # 新增：克隆分区信息
+)
+```
+
+#### 新增 update_task_node 接口
+用于从任务详情页编辑节点分区。
+
+### backend/api/nodes.py
+
+#### 新增工具上传接口
+```
+POST /{node_id}/upload-tools
+```
+接收 multipart/form-data，上传工具文件到节点的 tool_path。
+
+### backend/schemas/task.py
+
+#### TaskNodeUpdate 新增字段
+```python
+partition_path: Optional[str] = None  # 逗号分隔的分区路径
+```
+
+#### TaskNodeUpdate 导入修复
+确保 `TaskNodeUpdate` 在主 import 中可用。
+
+---
+
+## 3. 服务层变更
+
+### backend/services/ssh_service.py
+
+#### SFTP 文件操作
+```python
+def upload_file(self, local_path, remote_path): ...
+def upload_dir(self, local_path, remote_path): ...
+def ensure_dir_exists(self, path): ...
+def file_exists(self, path): ...
+```
+
+#### libaio 检测修复
+检测逻辑移出 `if not fio_found:` 块，确保始终执行。
+
+#### 工具路径获取
+```python
+def get_tool_path(self, tool_name, tool_path=None):
+    """获取工具路径，优先使用 tool_path"""
+    if tool_path:
+        tool_full_path = posixpath.join(tool_path, tool_name)
+        if self.file_exists(tool_full_path):
+            return tool_full_path
+    # 回退到系统默认
+    return f"command -v {tool_name}"
+```
+
+### backend/services/task_service.py
+
+#### 挂载点检查逻辑修复
+```python
+# 优先使用 task_node.partitions（逗号分隔），否则回退到 partition.mount_point
+mount_point_to_check = partition_paths[0] if partition_paths else (partition.mount_point if partition else None)
+```
+
+#### FIO 执行时工具目录支持
+```python
+fio_path = await ssh_service.get_tool_path("fio", ssh_service.tool_path)
+```
+
+---
+
+## 4. 前端变更
+
+### frontend/src/views/tasks/Detail.vue
+
+#### 节点列表显示分区
+```vue
+<span>{{ row.partitions || row.partition?.mount_point || `分区 ${row.partition_id}` }}</span>
+```
+
+#### 点击节点名称编辑分区
+```javascript
+const handleEditNodePartitions = (taskNode) => {
+  editNodeForm.value = {
+    task_node_id: taskNode.id,
+    node_id: taskNode.node_id,
+    node_name: taskNode.node?.name || `节点 ${taskNode.node_id}`,
+    partitions: taskNode.partitions || taskNode.partition?.mount_point || ''
+  }
+  editNodePartitionsVisible.value = true
+}
+```
+
+#### 添加节点时发送所有分区
+```javascript
+const handleAddNode = async () => {
+  // 不再循环调用，改为一次性发送所有分区
+  partition_path: nodeForm.value.partitions || ''
+}
+```
+
+### frontend/src/views/nodes/Index.vue
+
+- 点击节点名称打开编辑对话框
+- 移除独立的"详情"按钮，改为下拉菜单中的"查看详情"
+- 显示 tool_path 字段
+
+### frontend/src/router/index.js
+
+- 移除 `/nodes/:id` 路由
+
+### frontend/src/api/tasks.js
+
+- 新增 `updateTaskNodePartitions` API 方法
+
+---
+
+## 5. Docker 部署
+
+### 新增文件
+- `backend/Dockerfile`
+- `frontend/Dockerfile`
+- `frontend/nginx.conf`
+- `docker-compose.yml`
+- `DEPLOYMENT.md`
+
+---
+
+## 6. 错误修复
+
+| 问题 | 解决方案 |
+|------|---------|
+| 409 Conflict on add node | 前端改为一次性发送所有分区 |
+| partition_id cannot be null | 修改列为 nullable |
+| 422 missing task_node_update | TaskNodeUpdate 加入主 import |
+| AttributeError partition.mount_point | 使用 mount_point_to_check 变量 |
+| 分区信息为空 | get_task 预加载 task_nodes 及其关联 |
+| 克隆任务分区为空 | clone_task 时复制 partitions 字段 |
+
+---
+
+## 7. 数据库迁移命令
+
+```sql
+-- 添加 partitions 字段
+ALTER TABLE task_nodes ADD COLUMN partitions TEXT NULL;
+
+-- 允许 partition_id 为空
+ALTER TABLE task_nodes MODIFY COLUMN partition_id INT NULL;
+```

@@ -142,6 +142,18 @@ export const useTasksStore = defineStore('tasks', {
       }
     },
 
+    // 克隆任务
+    async cloneTask(taskId, cloneData) {
+      try {
+        const response = await tasksAPI.cloneTask(taskId, cloneData)
+        ElMessage.success('任务克隆成功')
+        await this.fetchTasks()
+        return response
+      } catch (error) {
+        throw error
+      }
+    },
+
     // 启动任务
     async startTask(taskId) {
       try {

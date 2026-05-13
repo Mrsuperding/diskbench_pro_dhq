@@ -79,7 +79,7 @@
           <template #default="{ row }">
             <div class="flex items-center">
               <div :class="getStatusDotClass(row.status)" class="w-3 h-3 rounded-full mr-2"></div>
-              <el-button type="text" class="!text-white font-medium !px-0" @click="handleViewDetail(row)">
+              <el-button type="text" class="!text-white font-medium !px-0" @click="handleEdit(row)">
                 {{ row.node_name }}
               </el-button>
             </div>
@@ -115,7 +115,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="160" fixed="right">
           <template #default="{ row }">
             <div class="flex space-x-2">
               <el-button
@@ -126,19 +126,16 @@
               >
                 测试连接
               </el-button>
-              <el-button
-                type="text"
-                size="small"
-                @click="$router.push(`/nodes/${row.id}`)"
-              >
-                详情
-              </el-button>
               <el-dropdown trigger="click">
                 <el-button type="text" size="small">
                   <EllipsisVerticalIcon class="w-4 h-4" />
                 </el-button>
                 <template #dropdown>
                   <el-dropdown-menu class="bg-slate-800/95 backdrop-blur-sm border-slate-600/50">
+                    <el-dropdown-item @click="handleViewDetail(row)">
+                      <EyeIcon class="w-4 h-4 mr-2" />
+                      查看详情
+                    </el-dropdown-item>
                     <el-dropdown-item @click="handleEdit(row)">
                       <PencilIcon class="w-4 h-4 mr-2" />
                       编辑
@@ -218,6 +215,10 @@
             <p class="text-white mt-1">{{ viewingNode.username }}</p>
           </div>
           <div>
+            <label class="text-sm text-slate-400">工具目录</label>
+            <p class="text-white mt-1">{{ viewingNode.tool_path || '未设置' }}</p>
+          </div>
+          <div>
             <label class="text-sm text-slate-400">最后检查</label>
             <p class="text-white mt-1">{{ formatTime(viewingNode.last_check) }}</p>
           </div>
@@ -253,7 +254,8 @@ import {
   MagnifyingGlassIcon,
   EllipsisVerticalIcon,
   PencilIcon,
-  TrashIcon
+  TrashIcon,
+  EyeIcon
 } from '@heroicons/vue/24/outline'
 
 const nodesStore = useNodesStore()

@@ -64,5 +64,20 @@ export const tasksAPI = {
   // 从任务移除节点
   removeTaskNode(taskId, nodeId) {
     return api.delete(`/tasks/${taskId}/nodes/${nodeId}`)
+  },
+
+  // 克隆任务
+  cloneTask(taskId, data) {
+    return api.post(`/tasks/${taskId}/clone`, data)
+  },
+
+  // 更新任务节点分区
+  updateTaskNodePartitions(taskId, taskNodeId, data) {
+    return api.put(`/tasks/${taskId}/nodes/${taskNodeId}`, data)
+  },
+
+  // 获取任务百分位延迟数据
+  getTaskPercentiles(taskId) {
+    return api.get(`/tasks/${taskId}/percentiles`)
   }
 }

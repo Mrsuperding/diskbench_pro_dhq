@@ -32,6 +32,7 @@ CREATE TABLE nodes (
     disk_info TEXT,
     created_by INT,
     is_public BOOLEAN DEFAULT FALSE,
+    tool_path VARCHAR(255) COMMENT '工具目录路径，用于存放 fio 等 IO 测试工具',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL

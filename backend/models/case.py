@@ -76,35 +76,42 @@ class TestCase(Base):
         filename: str = "testfile",
         ioengine_override: Optional[str] = None,
         output_file: Optional[str] = None,
+        fio_path_override: Optional[str] = None,
+        extra_options: Optional[list] = None,
     ) -> str:
         """
         生成 fio 命令（跨平台）
 
         Args:
             filename: 测试文件路径（会做路径规范化和 shell 转义）
+                       可以是单个文件路径，也可以是多个逗号分隔的路径
             ioengine_override: 由 SSHService.best_fio_ioengine() 探测得到的
                                实际可用 io engine，优先级高于 self.io_engine
             output_file: 如果指定，fio 会把 JSON 输出写到该文件（避免 stderr 污染）
+            fio_path_override: fio 可执行文件路径，默认使用系统 PATH 中的 fio
+            extra_options: 额外的 fio 选项列表
 
         Returns:
             拼装好的 fio 命令字符串，所有用户输入均经过 shlex 转义防注入
         """
         # 路径规范化：去除多余斜线（/ + /foo → /foo）
-        filename = posixpath.normpath(filename)
+        # 如果是多个文件（逗号分隔），分别处理每个
+        if ',' in filename:
+            filenames = [posixpath.normpath(f.strip()) for f in filename.split(',')]
+        else:
+            filenames = [posixpath.normpath(filename)]
 
-        # 所有可能混入不安全字符的参数都做转义
         name_q = shlex.quote(self.case_name or "fio_test")
-        file_q = shlex.quote(filename)
         engine = ioengine_override or self.io_engine or "psync"
         engine_q = shlex.quote(engine)
         bs_q = shlex.quote(self.block_size or "4k")
         size_q = shlex.quote(self.io_size or "1G")
         rw_q = shlex.quote(self.rw_mode or "read")
+        fio_binary = shlex.quote(fio_path_override) if fio_path_override else "fio"
 
         cmd_parts = [
-            "fio",
+            fio_binary,
             f"--name={name_q}",
-            f"--filename={file_q}",
             f"--ioengine={engine_q}",
             f"--bs={bs_q}",
             f"--iodepth={int(self.queue_depth or 1)}",
@@ -131,7 +138,6 @@ class TestCase(Base):
             pass
 
         # Direct IO：仅 Linux 支持 O_DIRECT，非 Linux 引擎应自动关闭
-        # 这里不在模型里做系统判断，交给调用方（task_service）通过参数决定
         if self.direct_io and engine in ("libaio", "io_uring"):
             cmd_parts.append("--direct=1")
 
@@ -147,6 +153,14 @@ class TestCase(Base):
 
         if self.group_reporting:
             cmd_parts.append("--group_reporting")
+
+        # 每个文件单独指定 --filename
+        for f in filenames:
+            cmd_parts.append(f"--filename={shlex.quote(f)}")
+
+        # 额外选项
+        if extra_options:
+            cmd_parts.extend(extra_options)
 
         # 关键修复：
         # 1. 用 --output 指定文件，避免 stderr 警告（如 engine fallback、

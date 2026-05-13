@@ -64,6 +64,10 @@ class Node(Base):
 
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     is_public = Column(Boolean, default=False, nullable=False)
+
+    # 工具目录路径（用于存放 fio 等 IO 测试工具）
+    tool_path = Column(String(255), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -95,6 +99,7 @@ class Node(Base):
             "disk_info": self.disk_info,
             "created_by": self.created_by,
             "is_public": self.is_public,
+            "tool_path": self.tool_path,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "partitions": [p.to_dict() for p in self.partitions] if self.partitions else [],

@@ -151,18 +151,17 @@
         </div>
         <el-table :data="taskNodes" border class="node-table" v-if="taskNodes.length > 0">
           <el-table-column prop="id" label="ID" width="60" />
-          <el-table-column label="节点" min-width="120">
+          <el-table-column label="节点" min-width="150">
             <template #default="{ row }">
-              <div class="node-info">
-                <span class="node-name">{{ row.node?.name || `节点 ${row.node_id}` }}</span>
-                <span class="node-host">{{ row.node?.host || '' }}</span>
-              </div>
+              <el-button type="text" class="!text-white font-medium !px-0" @click="handleEditNodePartitions(row)">
+                {{ row.node?.name || `节点 ${row.node_id}` }}
+              </el-button>
+              <div class="text-xs text-slate-400">{{ row.node?.host || '' }}</div>
             </template>
           </el-table-column>
           <el-table-column label="分区" min-width="150">
             <template #default="{ row }">
-              <span>{{ row.partition?.mount_point || `分区 ${row.partition_id}` }}</span>
-              <span class="partition-fs" v-if="row.partition?.filesystem">{{ row.partition.filesystem }}</span>
+              <span>{{ row.partitions || row.partition?.mount_point || `分区 ${row.partition_id}` }}</span>
             </template>
           </el-table-column>
           <el-table-column label="状态" width="100">
@@ -258,6 +257,58 @@
         </div>
       </div>
 
+      <!-- 性能详情 Tab -->
+      <div v-show="activeTab === 'percentiles'" class="tab-panel">
+        <div class="section-header">
+          <div class="section-title">
+            <h3>百分位延迟</h3>
+            <span class="node-count">共 {{ percentileData.length }} 条数据</span>
+          </div>
+          <el-button @click="loadPercentiles">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            刷新
+          </el-button>
+        </div>
+        <div class="percentile-table" v-if="percentileData.length > 0">
+          <table>
+            <thead>
+              <tr>
+                <th>节点</th>
+                <th>类型</th>
+                <th>p1</th>
+                <th>p50</th>
+                <th>p75</th>
+                <th>p90</th>
+                <th>p95</th>
+                <th>p99</th>
+                <th>p999</th>
+                <th>p9999</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template v-for="nodePercentiles in groupedPercentiles" :key="nodePercentiles.node_id">
+                <tr v-for="(item, idx) in nodePercentiles.data" :key="idx">
+                  <td v-if="idx === 0" :rowspan="nodePercentiles.data.length">{{ nodePercentiles.node_name }}</td>
+                  <td>{{ item.test_type }}</td>
+                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p1')) }}</td>
+                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p50')) }}</td>
+                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p75')) }}</td>
+                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p90')) }}</td>
+                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p95')) }}</td>
+                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p99')) }}</td>
+                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p999')) }}</td>
+                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p9999')) }}</td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="empty-state">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          <p>暂无性能数据</p>
+        </div>
+      </div>
+
       <!-- 日志 Tab -->
       <div v-show="activeTab === 'logs'" class="tab-panel">
         <div class="section-header">
@@ -313,6 +364,26 @@
       <template #footer>
         <el-button @click="addNodeVisible = false">取消</el-button>
         <el-button type="primary" @click="handleAddNode" :disabled="!nodeForm.node_id">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 编辑节点分区对话框 -->
+    <el-dialog v-model="editNodePartitionsVisible" title="编辑节点分区" width="600px" class="node-dialog">
+      <el-form :model="editNodeForm" label-width="100px" class="node-form">
+        <el-form-item label="节点">
+          <span class="text-white">{{ editNodeForm.node_name }}</span>
+        </el-form-item>
+        <el-form-item label="分区路径">
+          <el-input
+            v-model="editNodeForm.partitions"
+            placeholder="多个分区用逗号分隔，如: /data1, /data2, /mnt"
+          />
+        </el-form-item>
+        <div class="form-tip">支持同时添加多个分区，逗号分隔</div>
+      </el-form>
+      <template #footer>
+        <el-button @click="editNodePartitionsVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleUpdateNodePartitions">确定</el-button>
       </template>
     </el-dialog>
 
@@ -379,7 +450,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, h } from 'vue'
+import { ref, computed, onMounted, watch, h } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTasksStore } from '@stores/tasks'
 import { nodesAPI } from '@api/nodes'
@@ -397,6 +468,7 @@ const activeTab = ref('info')
 const taskNodes = ref([])
 const logs = ref([])
 const taskCases = ref([])
+const percentileData = ref([])
 
 // Tab 配置
 const InfoIcon = {
@@ -422,6 +494,13 @@ const CaseIcon = {
     h('line', { x1: 16, y1: 17, x2: 8, y2: 17 })
   ])
 }
+const PercentileIcon = {
+  render: () => h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 2 }, [
+    h('line', { x1: 18, y1: 20, x2: 18, y2: 10 }),
+    h('line', { x1: 12, y1: 20, x2: 12, y2: 4 }),
+    h('line', { x1: 6, y1: 20, x2: 6, y2: 14 })
+  ])
+}
 const LogIcon = {
   render: () => h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 2 }, [
     h('path', { d: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z' }),
@@ -435,6 +514,7 @@ const tabs = computed(() => [
   { key: 'info', label: '基本信息', icon: InfoIcon },
   { key: 'nodes', label: '节点', icon: NodeIcon, count: taskNodes.value.length },
   { key: 'case', label: '用例', icon: CaseIcon, count: taskCases.value.length },
+  { key: 'percentiles', label: '性能详情', icon: PercentileIcon, count: percentileData.value.length },
   { key: 'logs', label: '日志', icon: LogIcon, count: logs.value.length }
 ])
 
@@ -442,6 +522,10 @@ const tabs = computed(() => [
 const addNodeVisible = ref(false)
 const availableNodes = ref([])
 const nodeForm = ref({ node_id: null, partitions: '' })
+
+// 编辑节点分区
+const editNodePartitionsVisible = ref(false)
+const editNodeForm = ref({ task_node_id: null, node_id: null, node_name: '', partitions: '' })
 
 // 添加用例
 const addCaseVisible = ref(false)
@@ -513,6 +597,55 @@ const loadLogs = async () => {
   }
 }
 
+// 加载百分位数据
+const loadPercentiles = async () => {
+  try {
+    const res = await tasksAPI.getTaskPercentiles(taskId.value)
+    percentileData.value = res.data || []
+  } catch (e) {
+    console.error('Load percentiles failed:', e)
+  }
+}
+
+// 获取指定百分位值
+const getPercentile = (nodeData, testType, percentileName) => {
+  const found = percentileData.value.find(p =>
+    p.task_node_id === nodeData.task_node_id &&
+    p.test_type === testType &&
+    p.percentile_name === percentileName
+  )
+  return found ? found.latency_us : '-'
+}
+
+// 按节点分组百分位数据
+const groupedPercentiles = computed(() => {
+  const grouped = {}
+  percentileData.value.forEach(p => {
+    if (!grouped[p.task_node_id]) {
+      const taskNode = taskNodes.value.find(tn => tn.id === p.task_node_id)
+      grouped[p.task_node_id] = {
+        node_id: p.task_node_id,
+        node_name: taskNode?.node?.name || `节点 ${p.task_node_id}`,
+        data: []
+      }
+    }
+    // 检查是否已添加该 test_type 的数据
+    const existingEntry = grouped[p.task_node_id].data.find(d => d.test_type === p.test_type)
+    if (existingEntry) {
+      // 更新已有的百分位数据
+      Object.assign(existingEntry, { [p.percentile_name]: p.latency_us })
+    } else {
+      // 添加新的百分位数据行
+      grouped[p.task_node_id].data.push({
+        task_node_id: p.task_node_id,
+        test_type: p.test_type,
+        [p.percentile_name]: p.latency_us
+      })
+    }
+  })
+  return Object.values(grouped)
+})
+
 // 加载可用节点
 const loadAvailableNodes = async () => {
   try {
@@ -537,18 +670,12 @@ const handleAddNode = async () => {
     return
   }
   try {
-    // 解析逗号分隔的分区
-    const partitionList = nodeForm.value.partitions
-      ? nodeForm.value.partitions.split(',').map(p => p.trim()).filter(p => p)
-      : []
-    // 为每个分区创建一个节点关联
-    for (const partition of partitionList) {
-      await tasksAPI.addTaskNode(taskId.value, {
-        node_id: nodeForm.value.node_id,
-        partition_path: partition
-      })
-    }
-    ElMessage.success(`节点已添加 (${partitionList.length}个分区)`)
+    // 所有分区一次性发送（逗号分隔）
+    await tasksAPI.addTaskNode(taskId.value, {
+      node_id: nodeForm.value.node_id,
+      partition_path: nodeForm.value.partitions || ''
+    })
+    ElMessage.success('节点已添加')
     addNodeVisible.value = false
     await loadTask()
   } catch (e) {
@@ -565,6 +692,41 @@ const handleRemoveNode = async (node) => {
     await loadTask()
   } catch (e) {
     if (e !== 'cancel') ElMessage.error('移除失败')
+  }
+}
+
+// 编辑节点分区
+const handleEditNodePartitions = async (taskNode) => {
+  editNodeForm.value = {
+    task_node_id: taskNode.id,
+    node_id: taskNode.node_id,
+    node_name: taskNode.node?.name || `节点 ${taskNode.node_id}`,
+    partitions: taskNode.partitions || taskNode.partition?.mount_point || ''
+  }
+  editNodePartitionsVisible.value = true
+}
+
+const handleUpdateNodePartitions = async () => {
+  if (!editNodeForm.value.task_node_id) {
+    ElMessage.warning('无效的任务节点')
+    return
+  }
+  try {
+    // 解析逗号分隔的分区
+    const partitionList = editNodeForm.value.partitions
+      ? editNodeForm.value.partitions.split(',').map(p => p.trim()).filter(p => p)
+      : []
+
+    // 调用 API 更新节点分区
+    await tasksAPI.updateTaskNodePartitions(taskId.value, editNodeForm.value.task_node_id, {
+      partition_path: partitionList.join(',')
+    })
+
+    ElMessage.success('节点分区已更新')
+    editNodePartitionsVisible.value = false
+    await loadTask()
+  } catch (e) {
+    ElMessage.error('更新失败: ' + (e.message || '未知错误'))
   }
 }
 
@@ -639,6 +801,14 @@ const handleDelete = async () => {
 onMounted(async () => {
   await loadTask()
   await loadLogs()
+  await loadPercentiles()
+})
+
+// 切换 Tab 时加载对应数据
+watch(activeTab, async (newTab) => {
+  if (newTab === 'percentiles' && percentileData.value.length === 0) {
+    await loadPercentiles()
+  }
 })
 </script>
 
@@ -872,6 +1042,18 @@ onMounted(async () => {
   text-align: center;
   font-weight: 500;
 }
+
+/* 百分位表格 */
+.percentile-table { overflow-x: auto; }
+.percentile-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.percentile-table th, .percentile-table td {
+  padding: 12px 16px;
+  text-align: center;
+  border: 1px solid #334155;
+}
+.percentile-table th { background: #1e293b; color: #94a3b8; font-weight: 500; }
+.percentile-table td { color: #e2e8f0; }
+.percentile-table tr:hover td { background: #1e293b; }
 .log-level.info { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
 .log-level.warning { background: rgba(251, 191, 36, 0.2); color: #fbbf24; }
 .log-level.error { background: rgba(248, 113, 113, 0.2); color: #f87171; }

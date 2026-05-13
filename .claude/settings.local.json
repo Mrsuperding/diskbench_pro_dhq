@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from services.ssh_service import SSHService; print\\('SSHService import OK'\\)\")",
+      "Bash(python -c \"from models.case import TestCase; print\\('TestCase import OK'\\)\")",
+      "Bash(python -c \"from api.nodes import router; print\\('nodes router import OK'\\)\")",
+      "Bash(xargs grep *)",
+      "Bash(mysql *)",
+      "Bash(curl -s -X POST http://localhost:3000/api/auth/login -H 'Content-Type: application/json' -d '{\"username\":\"admin\",\"password\":\"admin123\"}')",
+      "Bash(curl -s \"http://localhost:3000/api/tasks/28\" -H \"Authorization: Bearer $\\(curl -s -X POST http://localhost:3000/api/auth/login -H 'Content-Type: application/json' -d '{\"username\":\"admin\",\"password\":\"admin123\"}')",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('task_nodes',[]\\), indent=2\\)\\)\")",
+      "Bash(python -c \"from services.task_service import TaskService; print\\('OK'\\)\")",
+      "Bash(python -c \"from api.tasks import router; print\\('OK'\\)\")"
+    ]
+  }
+}

@@ -86,6 +86,13 @@
         />
       </el-form-item>
 
+      <el-form-item label="工具目录" prop="tool_path">
+        <el-input
+          v-model="formData.tool_path"
+          placeholder="如 /opt/diskbench_tools，用于存放 fio 等工具"
+        />
+      </el-form-item>
+
       <el-form-item label="描述" prop="description">
         <el-input
           v-model="formData.description"
@@ -144,6 +151,7 @@ const defaultFormData = {
   private_key: '',
   os_type: 'linux',
   is_public: false,
+  tool_path: '',
   description: ''
 }
 

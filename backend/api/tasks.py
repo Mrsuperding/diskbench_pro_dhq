@@ -11,13 +11,14 @@ from models.task import Task, TaskNode, IOPerformanceData, IOStatData, TaskLog
 from models.case import TestCase
 from models.node import Node, NodePartition
 from schemas.task import (
-    TaskCreate, 
-    TaskUpdate, 
-    TaskResponse, 
+    TaskCreate,
+    TaskUpdate,
+    TaskResponse,
     TaskListResponse,
     TaskNodeResponse,
     TaskStatusUpdate,
     TaskNodeStatusUpdate,
+    TaskNodeUpdate,
     IOPerformanceDataCreate,
     IOStatDataCreate,
     TaskLogCreate,
@@ -25,8 +26,6 @@ from schemas.task import (
     TaskStatistics
 )
 from services.task_service import TaskService
-
-from schemas.task import TaskNodeCreate
 
 router = APIRouter()
 
@@ -92,7 +91,9 @@ async def get_task(
 
     # 预加载关联对象避免 lazy loading 问题
     task = db.query(Task).options(
-        joinedload(Task.test_case)
+        joinedload(Task.test_case),
+        selectinload(Task.task_nodes).joinedload(TaskNode.node),
+        selectinload(Task.task_nodes).joinedload(TaskNode.partition)
     ).filter(Task.id == task_id).first()
 
     if not task:
@@ -332,9 +333,7 @@ async def start_task(
         db.commit()
     
     db.commit()
-    
 
-    
     # 记录日志
     log_message = f"任务 {task_name} 已重新运行" if is_restart else f"任务 {task_name} 已启动"
     log_entry = TaskLog(
@@ -349,14 +348,14 @@ async def start_task(
     except Exception:
         db.rollback()
         raise
-    
+
     # 后台执行任务
     # 注意：不要把请求级 db 传给后台任务 —— 请求结束后 get_db 会关闭 session，
     # 后台任务此时再用就会报 "This Session is closed"。
     # TaskService 内部自己用 SessionLocal() 建独立 session。
     task_service = TaskService(socket_manager)
     background_tasks.add_task(task_service.execute_task, task_id)
-    
+
     # WebSocket通知
     await socket_manager.broadcast_to_task(str(task_id), "task_started", {
         "task_id": task_id,
@@ -364,7 +363,7 @@ async def start_task(
         "status": "running",
         "start_time": task.start_time.isoformat()
     })
-    
+
     return {"message": "任务启动成功", "task_id": task_id}
 
 @router.post("/{task_id}/stop")
@@ -481,7 +480,8 @@ async def clone_task(
         cloned_task_node = TaskNode(
             task_id=cloned_task.id,
             node_id=task_node.node_id,
-            partition_id=task_node.partition_id
+            partition_id=task_node.partition_id,
+            partitions=task_node.partitions
         )
         db.add(cloned_task_node)
     
@@ -596,62 +596,47 @@ async def add_task_node(
         db.refresh(db_task_node)
         return [db_task_node.to_dict()]
 
-    created_nodes = []
-    for partition_item in partition_paths:
-        # 判断是分区ID还是分区路径
-        if isinstance(partition_item, int) or (isinstance(partition_item, str) and partition_item.isdigit()):
-            partition_id = int(partition_item)
-            partition = db.query(NodePartition).filter(
-                NodePartition.id == partition_id,
-                NodePartition.node_id == task_node_data.node_id
-            ).first()
-            if not partition:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"分区不存在 (ID: {partition_id})"
-                )
-        else:
-            # 按分区路径查找或创建
-            partition = db.query(NodePartition).filter(
-                NodePartition.mount_point == partition_item,
-                NodePartition.node_id == task_node_data.node_id
-            ).first()
-            if not partition:
-                # 创建新分区
-                partition = NodePartition(
-                    node_id=task_node_data.node_id,
-                    partition_name=partition_item,
-                    mount_point=partition_item,
-                    filesystem="unknown"
-                )
-                db.add(partition)
-                db.commit()
-                db.refresh(partition)
+    # 检查是否已存在（同一节点）
+    existing = db.query(TaskNode).filter(
+        TaskNode.task_id == task_id,
+        TaskNode.node_id == task_node_data.node_id
+    ).first()
 
-        # 检查是否已存在（同一节点+同一分区）
-        existing = db.query(TaskNode).filter(
-            TaskNode.task_id == task_id,
-            TaskNode.node_id == task_node_data.node_id,
-            TaskNode.partition_id == partition.id
-        ).first()
+    if existing:
+        # 更新已有节点的分区
+        existing.partitions = ','.join(partition_paths)
+        db.commit()
+        db.refresh(existing)
+        return [existing.to_dict()]
 
-        if existing:
-            continue  # 跳过已存在的
-
-        # 创建任务节点
-        db_task_node = TaskNode(
-            task_id=task_id,
+    # 查找或创建一个占位分区（用于关联）
+    placeholder_partition = db.query(NodePartition).filter(
+        NodePartition.node_id == task_node_data.node_id,
+        NodePartition.mount_point == "__placeholder__"
+    ).first()
+    if not placeholder_partition:
+        placeholder_partition = NodePartition(
             node_id=task_node_data.node_id,
-            partition_id=partition.id
+            partition_name="__placeholder__",
+            mount_point="__placeholder__",
+            filesystem="unknown"
         )
-        db.add(db_task_node)
-        created_nodes.append(db_task_node)
+        db.add(placeholder_partition)
+        db.commit()
+        db.refresh(placeholder_partition)
 
+    # 创建任务节点（所有分区存储在一个 TaskNode 中）
+    db_task_node = TaskNode(
+        task_id=task_id,
+        node_id=task_node_data.node_id,
+        partition_id=placeholder_partition.id,
+        partitions=','.join(partition_paths)
+    )
+    db.add(db_task_node)
     db.commit()
-    for tn in created_nodes:
-        db.refresh(tn)
+    db.refresh(db_task_node)
 
-    return [tn.to_dict() for tn in created_nodes]
+    return [db_task_node.to_dict()]
 
 @router.delete("/{task_id}/nodes/{node_id}")
 async def remove_task_node(
@@ -695,8 +680,58 @@ async def remove_task_node(
     
     db.delete(task_node)
     db.commit()
-    
+
     return {"message": "任务节点移除成功"}
+
+@router.put("/{task_id}/nodes/{task_node_id}", response_model=TaskNodeResponse)
+async def update_task_node(
+    task_id: int,
+    task_node_id: int,
+    task_node_update: TaskNodeUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """更新任务节点（分区）"""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="任务不存在"
+        )
+
+    # 权限检查
+    if current_user.role != "admin" and task.created_by != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权修改此任务"
+        )
+
+    # 检查任务状态
+    if task.status == "running":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="无法修改正在运行的任务"
+        )
+
+    task_node = db.query(TaskNode).filter(
+        TaskNode.id == task_node_id,
+        TaskNode.task_id == task_id
+    ).first()
+
+    if not task_node:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="任务节点不存在"
+        )
+
+    # 如果提供了 partition_path，更新分区（逗号分隔的多个分区）
+    if task_node_update.partition_path:
+        task_node.partitions = task_node_update.partition_path
+        task_node.partition_id = None  # 清除旧的单分区关联
+        db.commit()
+        db.refresh(task_node)
+
+    return task_node.to_dict()
 
 # 性能数据相关接口
 @router.post("/{task_id}/performance-data")
@@ -772,8 +807,38 @@ async def get_performance_data(
         query = query.filter(IOPerformanceData.timestamp <= end_time)
     
     performance_data = query.order_by(IOPerformanceData.timestamp.asc()).all()
-    
+
     return [data.to_dict() for data in performance_data]
+
+
+@router.get("/{task_id}/percentiles")
+async def get_task_percentiles(
+    task_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取任务百分位延迟数据"""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="任务不存在"
+        )
+
+    if current_user.role != "admin" and task.created_by != current_user.id and not task.is_public:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权访问此任务"
+        )
+
+    from models.task_node_partition import TestResultPercentile
+
+    percentiles = db.query(TestResultPercentile).join(TaskNode).filter(
+        TaskNode.task_id == task_id
+    ).order_by(TestResultPercentile.test_type, TestResultPercentile.percentile_name).all()
+
+    return [p.to_dict() for p in percentiles]
+
 
 # 日志相关接口
 @router.get("/{task_id}/logs")

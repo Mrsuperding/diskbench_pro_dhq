@@ -57,12 +57,14 @@ class Task(Base):
 
 class TaskNode(Base):
     __tablename__ = "task_nodes"
-    
+
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False)
     node_id = Column(Integer, ForeignKey("nodes.id"), nullable=False)
     partition_id = Column(Integer, ForeignKey("node_partitions.id"), nullable=True)
-    status = Column(Enum("pending", "running", "completed", "failed", "cancelled"), 
+    # 支持多个分区：逗号分隔的分区路径
+    partitions = Column(Text, nullable=True)
+    status = Column(Enum("pending", "running", "completed", "failed", "cancelled"),
                    default="pending", nullable=False)
     start_time = Column(DateTime(timezone=True), nullable=True)
     end_time = Column(DateTime(timezone=True), nullable=True)
@@ -80,6 +82,7 @@ class TaskNode(Base):
     partition = relationship("NodePartition", back_populates="task_nodes")
     performance_data = relationship("IOPerformanceData", back_populates="task_node", cascade="all, delete-orphan")
     iostat_data = relationship("IOStatData", back_populates="task_node", cascade="all, delete-orphan")
+    percentiles = relationship("TestResultPercentile", back_populates="task_node", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<TaskNode(id={self.id}, task_id={self.task_id}, node_id={self.node_id}, status={self.status})>"
@@ -90,6 +93,7 @@ class TaskNode(Base):
             "task_id": self.task_id,
             "node_id": self.node_id,
             "partition_id": self.partition_id,
+            "partitions": self.partitions or "",
             "status": self.status,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "end_time": self.end_time.isoformat() if self.end_time else None,
@@ -101,7 +105,8 @@ class TaskNode(Base):
             "error_message": self.error_message,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "node": self.node.to_dict() if self.node else None,
-            "partition": self.partition.to_dict() if self.partition else None
+            "partition": self.partition.to_dict() if self.partition else None,
+            "percentiles": [p.to_dict() for p in self.percentiles] if self.percentiles else []
         }
 
 class IOPerformanceData(Base):
@@ -189,6 +194,7 @@ class IOStatData(Base):
             "aqu_sz": float(self.aqu_sz) if self.aqu_sz else 0,
             "util": float(self.util) if self.util else 0
         }
+
 
 class TaskLog(Base):
     __tablename__ = "task_logs"

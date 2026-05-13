@@ -4,6 +4,7 @@ import json
 import socket
 import shlex
 import re
+import posixpath
 from typing import Optional, Dict, List, Any, Tuple
 from io import StringIO
 
@@ -39,6 +40,7 @@ class SSHService:
         self.fio_version: Tuple[int, int] = (0, 0)
         self.has_lsblk_json: bool = False
         self.has_libaio: bool = False
+        self.tool_path: Optional[str] = None  # 节点工具目录路径
 
     # ---------------------------------------------------------------- 连接 ----
 
@@ -94,8 +96,15 @@ class SSHService:
         username: str,
         password: Optional[str] = None,
         private_key: Optional[str] = None,
+        tool_path: Optional[str] = None,
     ) -> bool:
-        """建立 SSH 连接并探测远端系统"""
+        """建立 SSH 连接并探测远端系统
+
+        Args:
+            tool_path: 节点的工具目录路径，优先使用该目录下的工具
+        """
+        # 存储工具目录路径
+        self.tool_path = tool_path
         try:
             self.client = paramiko.SSHClient()
             self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -160,6 +169,120 @@ class SSHService:
                 pass
         self.client = None
         self.connected = False
+
+    # ---------------------------------------------------------- SFTP 文件传输 ----
+
+    def _get_sftp(self):
+        """获取 SFTP 客户端（如果已连接）"""
+        if not self.connected or not self.client:
+            raise Exception("Not connected")
+        transport = self.client.get_transport()
+        if transport is None or not transport.is_active():
+            raise Exception("Transport inactive")
+        return transport.open_sftp()
+
+    async def ensure_dir_exists(self, remote_path: str) -> bool:
+        """
+        确保远程目录存在，如果不存在则创建
+        """
+        print(f"[SSH] ensure_dir_exists: {remote_path}")
+        safe_path = shlex.quote(remote_path)
+        r = await self.execute_command(f"mkdir -p {safe_path} && test -d {safe_path}", timeout=30)
+        success = r.get("success", False) and r.get("exit_status", 1) == 0
+        print(f"[SSH] ensure_dir_exists: result={success}")
+        return success
+
+    async def file_exists(self, remote_path: str) -> bool:
+        """检查远程文件是否存在"""
+        safe_path = shlex.quote(remote_path)
+        r = await self.execute_command(f"test -f {safe_path} && echo EXISTS || echo NOT_FOUND", timeout=10)
+        return r.get("stdout", "").strip() == "EXISTS"
+
+    async def upload_file(self, local_path: str, remote_path: str) -> bool:
+        """
+        上传单个文件到远程
+
+        Args:
+            local_path: 本地文件路径
+            remote_path: 远程目标路径
+
+        Returns:
+            是否上传成功
+        """
+        print(f"[SSH] upload_file: {local_path} -> {remote_path}")
+
+        def _sync_upload():
+            sftp = self._get_sftp()
+            try:
+                sftp.put(local_path, remote_path)
+                print(f"[SSH] upload_file: put succeeded")
+                return True
+            except Exception as e:
+                print(f"[SSH] upload_file: put failed: {e}")
+                return False
+            finally:
+                sftp.close()
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _sync_upload)
+        return result
+
+    async def upload_dir(self, local_path: str, remote_base: str) -> bool:
+        """
+        上传本地目录到远程（递归）
+
+        Args:
+            local_path: 本地目录路径
+            remote_base: 远程基础目录
+
+        Returns:
+            是否上传成功
+        """
+        print(f"[SSH] upload_dir: {local_path} -> {remote_base}")
+
+        import os
+        import posixpath
+
+        # 确保远程基础目录存在
+        await self.ensure_dir_exists(remote_base)
+
+        def _sync_upload_dir():
+            success = True
+            try:
+                sftp = self._get_sftp()
+
+                for root, dirs, files in os.walk(local_path):
+                    # 计算相对路径
+                    rel_dir = os.path.relpath(root, local_path)
+                    if rel_dir == ".":
+                        remote_dir = remote_base
+                    else:
+                        remote_dir = posixpath.join(remote_base, rel_dir.replace(os.sep, "/"))
+
+                    # 创建远程子目录
+                    try:
+                        sftp.stat(remote_dir)
+                    except IOError:
+                        # 目录不存在，创建
+                        sftp.mkdir(remote_dir)
+
+                    # 上传文件
+                    for file in files:
+                        local_file = os.path.join(root, file)
+                        remote_file = posixpath.join(remote_dir, file)
+                        print(f"[SSH] upload_dir: uploading {local_file} -> {remote_file}")
+                        sftp.put(local_file, remote_file)
+
+                sftp.close()
+            except Exception as e:
+                print(f"[SSH] upload_dir: error: {e}")
+                success = False
+
+            return success
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _sync_upload_dir)
+        return result
 
     # ---------------------------------------------------------- 命令执行核心 ----
 
@@ -317,23 +440,69 @@ class SSHService:
                     self.iostat_columns = [c.strip() for c in cols]
 
         # 4) fio
-        r = await self.execute_command(self._which_cmd("fio"), timeout=10)
-        fio_path = r.get("stdout", "").strip()
-        if fio_path and "not found" not in fio_path.lower():
-            self.has_fio = True
-            r = await self.execute_command("fio --version 2>&1 | head -1", timeout=10)
-            ver = r.get("stdout", "")
-            m = re.search(r"fio-?(\d+)\.(\d+)", ver)
-            if m:
-                self.fio_version = (int(m.group(1)), int(m.group(2)))
+        # 优先检查工具目录
+        fio_found = False
+        if self.tool_path:
+            safe_tool_path = shlex.quote(self.tool_path)
+            r = await self.execute_command(f"test -x {safe_tool_path}/fio && {safe_tool_path}/fio --version 2>&1 | head -1 || echo NOT_FOUND", timeout=10)
+            if r.get("stdout", "").strip() and "NOT_FOUND" not in r.get("stdout", ""):
+                self.has_fio = True
+                ver = r.get("stdout", "")
+                m = re.search(r"fio-?(\d+)\.(\d+)", ver)
+                if m:
+                    self.fio_version = (int(m.group(1)), int(m.group(2)))
+                    fio_found = True
+                    print(f"[SSH] fio found in tool_path: {self.tool_path}/fio version {self.fio_version}")
 
-            # 检测 libaio 是否可用（FIO 的可用 io engine 列表）
-            r = await self.execute_command("fio --enghelp 2>&1", timeout=10)
-            engines = r.get("stdout", "")
-            if "libaio" in engines.lower():
-                self.has_libaio = True
+        # 如果工具目录没有 fio，检查系统 fio
+        if not fio_found:
+            r = await self.execute_command(self._which_cmd("fio"), timeout=10)
+            fio_path = r.get("stdout", "").strip()
+            if fio_path and "not found" not in fio_path.lower():
+                self.has_fio = True
+                r = await self.execute_command("fio --version 2>&1 | head -1", timeout=10)
+                ver = r.get("stdout", "")
+                m = re.search(r"fio-?(\d+)\.(\d+)", ver)
+                if m:
+                    self.fio_version = (int(m.group(1)), int(m.group(2)))
 
-        # 5) lsblk JSON 支持（util-linux >= 2.27）
+        # 5) 检测 libaio 是否可用（FIO 的可用 io engine 列表）
+        # 注意：不管 fio 从哪里找到的，都要检查 libaio 是否可用
+        # 因为即使 fio 存在，libaio 库可能未安装
+        r = await self.execute_command("fio --enghelp 2>&1", timeout=10)
+        engines_output = r.get("stdout", "")
+        print(f"[SSH] fio --enghelp 输出: {engines_output[:500]}")
+        self.has_libaio = "libaio" in engines_output.lower()
+
+        # 检查是否有本地离线 libaio（放在 tool_path/lib 下）
+        libaio_local = False
+        if self.tool_path:
+            lib_path = posixpath.join(self.tool_path, "lib")
+            r = await self.execute_command(f"ls {lib_path}/libaio*.so* 2>/dev/null || echo 'NOT_FOUND'", timeout=10)
+            if "NOT_FOUND" not in r.get("stdout", ""):
+                libaio_local = True
+                print(f"[SSH] 发现本地 libaio 库: {r.get('stdout', '').strip()}")
+
+        if not self.has_libaio:
+            if libaio_local:
+                print(f"[SSH] libaio not detected in fio --enghelp, 但发现本地库，将通过 LD_LIBRARY_PATH 使用")
+                self.has_libaio = True  # 标记为可用，本地库会在运行时被找到
+            else:
+                print(f"[SSH] libaio not detected in fio --enghelp output, will attempt auto-install")
+
+        # 尝试自动安装 libaio（如果缺失且是 Linux 且没有本地库）
+        if self.os_family == "linux" and not self.has_libaio and not libaio_local:
+            print(f"[SSH] Attempting to auto-install libaio...")
+            install_success = await self._install_libaio()
+            if install_success:
+                # 重新检测
+                r = await self.execute_command("fio --enghelp 2>&1", timeout=10)
+                engines_output = r.get("stdout", "")
+                print(f"[SSH] libaio after auto-install fio --enghelp: {engines_output[:500]}")
+                self.has_libaio = "libaio" in engines_output.lower()
+                print(f"[SSH] libaio after auto-install: {'yes' if self.has_libaio else 'no'}")
+
+        # 6) lsblk JSON 支持（util-linux >= 2.27）
         if self.os_family == "linux":
             r = await self.execute_command("lsblk --help 2>&1 | grep -q -- ' -J' && echo yes || echo no", timeout=10)
             self.has_lsblk_json = r.get("stdout", "").strip() == "yes"
@@ -347,6 +516,123 @@ class SSHService:
         # 用 shlex.quote 防注入
         binary = shlex.quote(binary)
         return f"command -v {binary} 2>/dev/null || echo 'NOT_FOUND'"
+
+    async def get_tool_path(self, tool_name: str, tool_path: Optional[str] = None) -> str:
+        """
+        获取工具的完整路径
+
+        Args:
+            tool_name: 工具名称（如 fio, iostat）
+            tool_path: 节点配置的工具目录路径（可选）
+
+        Returns:
+            工具的完整路径
+            - 如果 tool_path 存在且目录中有该工具，返回 {tool_path}/{tool_name}
+            - 否则返回系统PATH中的路径（通过 command -v）
+        """
+        if tool_path:
+            # 工具目录优先
+            safe_tool_path = shlex.quote(tool_path)
+            safe_tool_name = shlex.quote(tool_name)
+            remote_tool_path = posixpath.join(tool_path, tool_name)
+            r = await self.execute_command(f"test -x {shlex.quote(remote_tool_path)} && echo {shlex.quote(remote_tool_path)} || echo NOT_FOUND", timeout=10)
+            result = r.get("stdout", "").strip()
+            if result and result != "NOT_FOUND":
+                print(f"[SSH] get_tool_path: found {result} in tool_path")
+                return result
+            print(f"[SSH] get_tool_path: {remote_tool_path} not found or not executable in tool_path, falling back to system")
+
+        # 回退到系统 PATH
+        result = await self.execute_command(self._which_cmd(tool_name), timeout=10)
+        fio_path = result.get("stdout", "").strip()
+        print(f"[SSH] get_tool_path: system {tool_name} at {fio_path}")
+        return fio_path
+
+    def get_lib_path(self) -> Optional[str]:
+        """
+        获取依赖库目录路径
+        假设 libaio 等依赖库放在 {tool_path}/lib 目录下
+        """
+        if self.tool_path:
+            return posixpath.join(self.tool_path, "lib")
+        return None
+
+    async def configure_ld_library_path(self) -> bool:
+        """
+        配置 LD_LIBRARY_PATH 使远程节点能加载自定义依赖库
+        在 /etc/ld.so.conf.d/ 下创建配置文件，或设置环境变量
+        """
+        lib_path = self.get_lib_path()
+        if not lib_path:
+            return False
+
+        try:
+            # 方法1: 在 /etc/ld.so.conf.d/ 下创建配置文件（需要 root）
+            conf_file = "/etc/ld.so.conf.d/diskbench_tool_lib.conf"
+            # 先检查是否已有配置
+            check = await self.execute_command(f"cat {conf_file} 2>/dev/null || echo 'NOT_EXISTS'", timeout=10)
+            if check.get("stdout", "").strip() != "NOT_EXISTS":
+                # 已存在配置，追加新路径
+                await self.execute_command(f"echo '{lib_path}' >> {conf_file}", timeout=10)
+            else:
+                # 创建新配置
+                await self.execute_command(f"echo '{lib_path}' > {conf_file}", timeout=10)
+            # 更新 ldconfig 缓存
+            await self.execute_command("ldconfig", timeout=10)
+            print(f"[SSH] configure_ld_library_path: added {lib_path} to ld.so.conf")
+            return True
+        except Exception as e:
+            print(f"[SSH] configure_ld_library_path: failed, will use LD_LIBRARY_PATH env var: {e}")
+            return False
+
+    def build_command_with_ld_library_path(self, command: str) -> str:
+        """
+        构建带 LD_LIBRARY_PATH 的命令
+        用于在 tool_path 包含自定义库时，确保 fio 能找到这些库
+        """
+        lib_path = self.get_lib_path()
+        if lib_path:
+            return f"LD_LIBRARY_PATH={lib_path}:$LD_LIBRARY_PATH {command}"
+        return command
+
+    async def _install_libaio(self) -> bool:
+        """
+        自动安装 libaio
+        支持主流 Linux 发行版：CentOS/RHEL, Ubuntu/Debian, Alpine
+        """
+        if self.os_family != "linux":
+            print(f"[SSH] _install_libaio: not Linux, skipping")
+            return False
+
+        print(f"[SSH] _install_libaio: distro={self.distro}")
+
+        # 根据发行版选择安装命令
+        install_cmd = None
+        if self.distro in ("centos", "rhel", "rocky", "almalinux"):
+            # CentOS/RHEL/EL 系列
+            install_cmd = "yum install -y libaio"
+        elif self.distro in ("ubuntu", "debian"):
+            # Debian/Ubuntu 系列
+            install_cmd = "apt-get update && apt-get install -y libaio-dev"
+        elif self.distro == "alpine":
+            # Alpine Linux
+            install_cmd = "apk add --no-cache libaio"
+        elif self.distro == "fedora":
+            install_cmd = "dnf install -y libaio"
+        else:
+            # 尝试通用的 rpm/deb 安装方式
+            print(f"[SSH] _install_libaio: unknown distro {self.distro}, trying yum...")
+
+        if not install_cmd:
+            print(f"[SSH] _install_libaio: no install command for distro {self.distro}")
+            return False
+
+        print(f"[SSH] _install_libaio: executing '{install_cmd}'")
+        r = await self.execute_command(install_cmd, timeout=120)
+        success = r.get("success", False)
+        print(f"[SSH] _install_libaio: result success={success}, stdout={r.get('stdout', '')[:200]}, stderr={r.get('stderr', '')[:200]}")
+
+        return success
 
     def get_system_fingerprint(self) -> Dict[str, Any]:
         """返回探测到的系统指纹（用于日志和调试）"""

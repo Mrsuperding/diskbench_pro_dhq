@@ -667,6 +667,8 @@ def _save_percentile_data_sync(db: Session, task_id: int, task_node_id: int, job
     except Exception as e:
         print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] 保存百分位延迟失败: {e!s}")
         db.rollback()
+    finally:
+        db.close()
 
     @staticmethod
     def _aggregate_jobs(jobs: list) -> dict:

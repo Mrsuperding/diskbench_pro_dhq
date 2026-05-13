@@ -471,6 +471,7 @@ class TaskService:
         关键修复：兼容 fio 2.x / 3.x 字段差异（lat vs lat_ns）
         """
         print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] 开始解析FIO JSON...")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] JSON内容前200字符: {fio_output[:200]}")
         try:
             # fio 可能在 JSON 前打印 terse-output 或 debug 信息，找到第一个 { 开始解析
             brace_idx = fio_output.find("{")
@@ -491,6 +492,10 @@ class TaskService:
             read_stats = job.get("read", {}) or {}
             write_stats = job.get("write", {}) or {}
 
+            # Debug: 打印 read stats 的 key
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read_stats keys: {list(read_stats.keys())}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] write_stats keys: {list(write_stats.keys())}")
+
             total_iops = float(read_stats.get("iops", 0)) + float(write_stats.get("iops", 0))
             # fio bw 单位是 KB/s，转成 MB/s
             total_bw_mbs = (
@@ -500,6 +505,7 @@ class TaskService:
             # 延迟：兼容 fio 2.x / 3.x
             read_lat_us = self._extract_latency_us(read_stats)
             write_lat_us = self._extract_latency_us(write_stats)
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read_lat_us={read_lat_us:.3f}, write_lat_us={write_lat_us:.3f}")
 
             # 非零方取均值
             nonzero = [x for x in (read_lat_us, write_lat_us) if x > 0]
@@ -543,7 +549,7 @@ class TaskService:
             )
             db.add(perf)
             db.commit()
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 性能数据已保存到数据库")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 性能数据已保存到数据库, perf_id={perf.id}")
 
             # 保存百分位数延迟数据
             await self._save_percentile_data(db, task_id, task_node_id, job)
@@ -631,7 +637,10 @@ class TaskService:
                 stats = job.get(test_type, {}) or {}
                 lat_ns = stats.get("lat_ns", {})
 
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: lat_ns={lat_ns}, keys={list(lat_ns.keys()) if lat_ns else 'empty'}")
+
                 if not lat_ns:
+                    print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: 无 lat_ns 数据，跳过百分位数保存")
                     continue
 
                 # fio 3.x 使用 lat_ns perc 数组，索引对应百分位
@@ -649,6 +658,7 @@ class TaskService:
                 for name, idx in percentile_mapping.items():
                     if idx < len(perc_values):
                         latency_us = float(perc_values[idx])
+                        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type} {name}= {latency_us} us (idx={idx})")
 
                         # 检查是否已存在
                         existing = db.query(TestResultPercentile).filter(

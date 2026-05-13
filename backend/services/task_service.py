@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy.orm import Session
-from sqlalchemy import text
 
 from core.database import SessionLocal
 from models.task import Task, TaskNode, IOPerformanceData, IOStatData, TaskLog
@@ -521,145 +520,153 @@ class TaskService:
         print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   平均延迟: {avg_lat_ms:.3f} ms")
 
         # ============================================================
-        # 写库操作：使用独立的新session，与FIO执行期间的长等待完全隔离
+        # 写库操作：使用 asyncio.to_thread 丢到独立线程执行
+        # 彻底避免 async 函数中同步 DB 操作导致的连接争抢问题
         # ============================================================
-        self._save_results_with_new_session(
+        ws_data = await asyncio.to_thread(
+            _save_results_sync,
             task_id, task_node_id, total_iops, total_bw_mbs, avg_lat_ms,
             read_stats, write_stats, read_lat_us, write_lat_us, job
         )
 
-    def _save_results_with_new_session(
-        self, task_id: int, task_node_id: int,
-        total_iops: float, total_bw_mbs: float, avg_lat_ms: float,
-        read_stats: dict, write_stats: dict,
-        read_lat_us: float, write_lat_us: float, job: dict
-    ):
-        """
-        使用全新session保存所有结果（TaskNode更新 + IOPerformanceData + 百分位数）
-        这样可以避免FIO执行期间连接超时的问题
-        """
-        db = SessionLocal()
-        try:
-            # 1. 更新 TaskNode
-            task_node = db.query(TaskNode).filter(TaskNode.id == task_node_id).first()
-            if not task_node:
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 警告: TaskNode不存在")
-                return
-
-            task_node.iops = total_iops
-            task_node.bandwidth = total_bw_mbs
-            task_node.latency = avg_lat_ms
-            task_node.io_ops = int(
-                (read_stats.get("total_ios") or 0) + (write_stats.get("total_ios") or 0)
-            )
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 更新TaskNode数据库记录...")
-
-            # 2. 保存 IOPerformanceData
-            perf = IOPerformanceData(
-                task_node_id=task_node_id,
-                iops=total_iops,
-                bandwidth=total_bw_mbs,
-                latency=avg_lat_ms,
-                read_iops=float(read_stats.get("iops", 0)),
-                write_iops=float(write_stats.get("iops", 0)),
-                read_bw=float(read_stats.get("bw", 0)) / 1024.0,
-                write_bw=float(write_stats.get("bw", 0)) / 1024.0,
-                read_lat=read_lat_us / 1000.0,
-                write_lat=write_lat_us / 1000.0,
-            )
-            db.add(perf)
-            db.commit()
-            # 显式refresh加载数据库生成的值（如id），避免隐式查询触发连接问题
-            db.refresh(perf)
-            perf_id_val = perf.id
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 性能数据已保存到数据库, perf_id={perf_id_val}")
-
-            # 3. 保存百分位数延迟数据
-            self._save_percentile_data_in_session(db, task_id, task_node_id, job)
-
-            # 4. 发送WebSocket通知（使用同一session中加载的task_node）
+        # WebSocket通知（在async上下文中发送）
+        if ws_data:
             print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.3] 发送WebSocket性能更新...")
-            # 注意：需要重新获取node_name，因为session可能已关闭
-            from models.node import Node
-            node_name = db.query(Node).filter(Node.id == task_node.node_id).first().node_name
-            asyncio.create_task(self.socket_manager.broadcast_to_task(
+            await self.socket_manager.broadcast_to_task(
                 str(task_id),
                 "performance_update",
-                {
-                    "task_node_id": task_node_id,
-                    "node_name": node_name,
-                    "iops": total_iops,
-                    "bandwidth": total_bw_mbs,
-                    "latency": avg_lat_ms,
-                    "timestamp": datetime.utcnow().isoformat(),
-                },
-            ))
+                ws_data
+            )
             print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.3] WebSocket通知已发送")
 
-        except Exception as e:
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.ERROR] 保存结果失败: {e!s}")
-            import traceback
-            traceback.print_exc()
-            try:
-                db.rollback()
-            except Exception:
-                pass
-        finally:
-            db.close()
 
-    def _save_percentile_data_in_session(self, db: Session, task_id: int, task_node_id: int, job: dict):
-        """在已有session中保存百分位数数据"""
+def _save_results_sync(
+    task_id: int, task_node_id: int,
+    total_iops: float, total_bw_mbs: float, avg_lat_ms: float,
+    read_stats: dict, write_stats: dict,
+    read_lat_us: float, write_lat_us: float, job: dict
+) -> dict:
+    """
+    同步函数：在独立线程中执行所有数据库操作
+    避免 async 上下文中同步 DB 操作导致的连接争抢和数据包乱序问题
+    返回 WebSocket 通知所需的数据
+    """
+    db = SessionLocal()
+    try:
+        # 1. 更新 TaskNode
+        task_node = db.query(TaskNode).filter(TaskNode.id == task_node_id).first()
+        if not task_node:
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 警告: TaskNode不存在")
+            return {}
+
+        task_node.iops = total_iops
+        task_node.bandwidth = total_bw_mbs
+        task_node.latency = avg_lat_ms
+        task_node.io_ops = int(
+            (read_stats.get("total_ios") or 0) + (write_stats.get("total_ios") or 0)
+        )
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 更新TaskNode数据库记录...")
+
+        # 2. 保存 IOPerformanceData
+        perf = IOPerformanceData(
+            task_node_id=task_node_id,
+            iops=total_iops,
+            bandwidth=total_bw_mbs,
+            latency=avg_lat_ms,
+            read_iops=float(read_stats.get("iops", 0)),
+            write_iops=float(write_stats.get("iops", 0)),
+            read_bw=float(read_stats.get("bw", 0)) / 1024.0,
+            write_bw=float(write_stats.get("bw", 0)) / 1024.0,
+            read_lat=read_lat_us / 1000.0,
+            write_lat=write_lat_us / 1000.0,
+        )
+        db.add(perf)
+        db.commit()
+        db.refresh(perf)
+        perf_id_val = perf.id
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 性能数据已保存到数据库, perf_id={perf_id_val}")
+
+        # 3. 保存百分位数延迟数据
+        _save_percentile_data_sync(db, task_id, task_node_id, job)
+
+        # 4. 获取node_name用于WebSocket通知
+        from models.node import Node
+        node_name = db.query(Node).filter(Node.id == task_node.node_id).first().node_name
+
+        return {
+            "task_node_id": task_node_id,
+            "node_name": node_name,
+            "iops": total_iops,
+            "bandwidth": total_bw_mbs,
+            "latency": avg_lat_ms,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+    except Exception as e:
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.ERROR] 保存结果失败: {e!s}")
+        import traceback
+        traceback.print_exc()
         try:
-            for test_type in ("read", "write"):
-                stats = job.get(test_type, {}) or {}
-                lat_ns = stats.get("lat_ns", {})
-
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: stats keys={list(stats.keys())}")
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: lat_ns={lat_ns}, keys={list(lat_ns.keys()) if lat_ns else 'empty'}")
-
-                if not lat_ns:
-                    clat_ns = stats.get("clat_ns", {})
-                    if clat_ns:
-                        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: 使用 clat_ns 代替 lat_ns")
-                        lat_ns = clat_ns
-                    else:
-                        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: 无 lat_ns/clat_ns 数据，跳过百分位数保存")
-                        continue
-
-                perc_values = lat_ns.get("perc", [])
-                percentile_mapping = {
-                    "p1": 0, "p50": 1, "p75": 2, "p90": 3, "p95": 4,
-                    "p99": 5, "p999": 6, "p9999": 7, "p99999": 8
-                }
-
-                for name, idx in percentile_mapping.items():
-                    if idx < len(perc_values):
-                        latency_us = float(perc_values[idx])
-                        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type} {name}= {latency_us} us (idx={idx})")
-
-                        existing = db.query(TestResultPercentile).filter(
-                            TestResultPercentile.task_node_id == task_node_id,
-                            TestResultPercentile.percentile_name == name,
-                            TestResultPercentile.test_type == test_type
-                        ).first()
-
-                        if existing:
-                            existing.latency_us = latency_us
-                        else:
-                            percentile = TestResultPercentile(
-                                task_node_id=task_node_id,
-                                percentile_name=name,
-                                latency_us=latency_us,
-                                test_type=test_type
-                            )
-                            db.add(percentile)
-
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type} 百分位延迟已保存")
-
-            db.commit()
-        except Exception as e:
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] 保存百分位延迟失败: {e!s}")
             db.rollback()
+        except Exception:
+            pass
+        return {}
+    finally:
+        db.close()
+
+def _save_percentile_data_sync(db: Session, task_id: int, task_node_id: int, job: dict):
+    """同步函数：在已有session中保存百分位数数据"""
+    try:
+        for test_type in ("read", "write"):
+            stats = job.get(test_type, {}) or {}
+            lat_ns = stats.get("lat_ns", {})
+
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: stats keys={list(stats.keys())}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: lat_ns={lat_ns}, keys={list(lat_ns.keys()) if lat_ns else 'empty'}")
+
+            if not lat_ns:
+                clat_ns = stats.get("clat_ns", {})
+                if clat_ns:
+                    print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: 使用 clat_ns 代替 lat_ns")
+                    lat_ns = clat_ns
+                else:
+                    print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: 无 lat_ns/clat_ns 数据，跳过百分位数保存")
+                    continue
+
+            perc_values = lat_ns.get("perc", [])
+            percentile_mapping = {
+                "p1": 0, "p50": 1, "p75": 2, "p90": 3, "p95": 4,
+                "p99": 5, "p999": 6, "p9999": 7, "p99999": 8
+            }
+
+            for name, idx in percentile_mapping.items():
+                if idx < len(perc_values):
+                    latency_us = float(perc_values[idx])
+                    print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type} {name}= {latency_us} us (idx={idx})")
+
+                    existing = db.query(TestResultPercentile).filter(
+                        TestResultPercentile.task_node_id == task_node_id,
+                        TestResultPercentile.percentile_name == name,
+                        TestResultPercentile.test_type == test_type
+                    ).first()
+
+                    if existing:
+                        existing.latency_us = latency_us
+                    else:
+                        percentile = TestResultPercentile(
+                            task_node_id=task_node_id,
+                            percentile_name=name,
+                            latency_us=latency_us,
+                            test_type=test_type
+                        )
+                        db.add(percentile)
+
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type} 百分位延迟已保存")
+
+        db.commit()
+    except Exception as e:
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] 保存百分位延迟失败: {e!s}")
+        db.rollback()
 
     @staticmethod
     def _aggregate_jobs(jobs: list) -> dict:
@@ -712,72 +719,6 @@ class TaskService:
         if "clat" in stats:
             return float(stats["clat"].get("mean", 0))
         return 0.0
-
-    async def _save_percentile_data(self, db: Session, task_id: int, task_node_id: int, job: dict):
-        """
-        从 fio job 结果中提取百分位数延迟并保存到数据库
-        fio 的 lat_ns perc 字段包含百分位数值（如 lat_ns perc 1=5000 表示 1% 延迟 5000ns）
-        """
-        try:
-            # 支持读取和写入的百分位数据
-            for test_type in ("read", "write"):
-                stats = job.get(test_type, {}) or {}
-                lat_ns = stats.get("lat_ns", {})
-
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: stats keys={list(stats.keys())}")
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: lat_ns={lat_ns}, keys={list(lat_ns.keys()) if lat_ns else 'empty'}")
-
-                if not lat_ns:
-                    # 尝试获取clat_ns
-                    clat_ns = stats.get("clat_ns", {})
-                    if clat_ns:
-                        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: 使用 clat_ns 代替 lat_ns")
-                        lat_ns = clat_ns
-                    else:
-                        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: 无 lat_ns/clat_ns 数据，跳过百分位数保存")
-                        continue
-
-                # fio 3.x 使用 lat_ns perc 数组，索引对应百分位
-                # fio 输出 perc 数组示例: [5000, 10000, 25000, 50000, 95000, 99000, 99900, 99990, 99999, 999999]
-                # 对应百分位: 1%, 50%, 75%, 90%, 95%, 99%, 99.9%, 99.99%, 99.999%, 100%
-                perc_values = lat_ns.get("perc", [])
-
-                # 定义要保存的百分位数
-                # perc_index 0=1%, 1=50%, 2=75%, 3=90%, 4=95%, 5=99%, 6=99.9%, 7=99.99%, 8=99.999%
-                percentile_mapping = {
-                    "p1": 0, "p50": 1, "p75": 2, "p90": 3, "p95": 4,
-                    "p99": 5, "p999": 6, "p9999": 7, "p99999": 8
-                }
-
-                for name, idx in percentile_mapping.items():
-                    if idx < len(perc_values):
-                        latency_us = float(perc_values[idx])
-                        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type} {name}= {latency_us} us (idx={idx})")
-
-                        # 检查是否已存在
-                        existing = db.query(TestResultPercentile).filter(
-                            TestResultPercentile.task_node_id == task_node_id,
-                            TestResultPercentile.percentile_name == name,
-                            TestResultPercentile.test_type == test_type
-                        ).first()
-
-                        if existing:
-                            existing.latency_us = latency_us
-                        else:
-                            percentile = TestResultPercentile(
-                                task_node_id=task_node_id,
-                                percentile_name=name,
-                                latency_us=latency_us,
-                                test_type=test_type
-                            )
-                            db.add(percentile)
-
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type} 百分位延迟已保存")
-
-            db.commit()
-        except Exception as e:
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] 保存百分位延迟失败: {e!s}")
-            db.rollback()
 
     # -------------------------------------------------------- 性能监控采集 ----
 

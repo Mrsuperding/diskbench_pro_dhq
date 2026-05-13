@@ -473,60 +473,76 @@ class TaskService:
         """
         print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] 开始解析FIO JSON...")
         print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] JSON内容前200字符: {fio_output[:200]}")
+
+        # 解析JSON（纯计算，不需要db）
+        data = json.loads(fio_output)
+        jobs = data.get("jobs", [])
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] 解析到 {len(jobs)} 个job")
+        if not jobs:
+            raise ValueError("fio 输出中没有 jobs")
+
+        # group_reporting=True 时 jobs[0] 是聚合结果
+        # 否则需要汇总所有 jobs
+        job = jobs[0] if len(jobs) == 1 else self._aggregate_jobs(jobs)
+
+        read_stats = job.get("read", {}) or {}
+        write_stats = job.get("write", {}) or {}
+
+        # Debug: 打印 read stats 的 key 和 lat 相关字段
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read_stats keys: {list(read_stats.keys())}")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] write_stats keys: {list(write_stats.keys())}")
+        if "lat_ns" in read_stats:
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read lat_ns: {read_stats['lat_ns']}")
+        if "lat" in read_stats:
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read lat: {read_stats['lat']}")
+
+        total_iops = float(read_stats.get("iops", 0)) + float(write_stats.get("iops", 0))
+        # fio bw 单位是 KB/s，转成 MB/s
+        total_bw_mbs = (
+            float(read_stats.get("bw", 0)) + float(write_stats.get("bw", 0))
+        ) / 1024.0
+
+        # 延迟：兼容 fio 2.x / 3.x
+        read_lat_us = self._extract_latency_us(read_stats)
+        write_lat_us = self._extract_latency_us(write_stats)
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read_lat_us={read_lat_us:.3f}, write_lat_us={write_lat_us:.3f}")
+
+        # 非零方取均值
+        nonzero = [x for x in (read_lat_us, write_lat_us) if x > 0]
+        avg_lat_ms = (sum(nonzero) / len(nonzero) / 1000.0) if nonzero else 0.0
+
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 解析结果:")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   读IOPS: {read_stats.get('iops', 0):.2f}")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   写IOPS: {write_stats.get('iops', 0):.2f}")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   总IOPS: {total_iops:.2f}")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   读带宽: {float(read_stats.get('bw', 0))/1024:.2f} MB/s")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   写带宽: {float(write_stats.get('bw', 0))/1024:.2f} MB/s")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   总带宽: {total_bw_mbs:.2f} MB/s")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   读延迟: {read_lat_us/1000:.3f} ms")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   写延迟: {write_lat_us/1000:.3f} ms")
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   平均延迟: {avg_lat_ms:.3f} ms")
+
+        # ============================================================
+        # 写库操作：使用独立的新session，与FIO执行期间的长等待完全隔离
+        # ============================================================
+        self._save_results_with_new_session(
+            task_id, task_node_id, total_iops, total_bw_mbs, avg_lat_ms,
+            read_stats, write_stats, read_lat_us, write_lat_us, job
+        )
+
+    def _save_results_with_new_session(
+        self, task_id: int, task_node_id: int,
+        total_iops: float, total_bw_mbs: float, avg_lat_ms: float,
+        read_stats: dict, write_stats: dict,
+        read_lat_us: float, write_lat_us: float, job: dict
+    ):
+        """
+        使用全新session保存所有结果（TaskNode更新 + IOPerformanceData + 百分位数）
+        这样可以避免FIO执行期间连接超时的问题
+        """
+        db = SessionLocal()
         try:
-            # fio 可能在 JSON 前打印 terse-output 或 debug 信息，找到第一个 { 开始解析
-            brace_idx = fio_output.find("{")
-            if brace_idx > 0:
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] JSON前有额外内容，跳过前{brace_idx}字符")
-                fio_output = fio_output[brace_idx:]
-
-            data = json.loads(fio_output)
-            jobs = data.get("jobs", [])
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] 解析到 {len(jobs)} 个job")
-            if not jobs:
-                raise ValueError("fio 输出中没有 jobs")
-
-            # group_reporting=True 时 jobs[0] 是聚合结果
-            # 否则需要汇总所有 jobs
-            job = jobs[0] if len(jobs) == 1 else self._aggregate_jobs(jobs)
-
-            read_stats = job.get("read", {}) or {}
-            write_stats = job.get("write", {}) or {}
-
-            # Debug: 打印 read stats 的 key 和 lat 相关字段
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read_stats keys: {list(read_stats.keys())}")
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] write_stats keys: {list(write_stats.keys())}")
-            if "lat_ns" in read_stats:
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read lat_ns: {read_stats['lat_ns']}")
-            if "lat" in read_stats:
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read lat: {read_stats['lat']}")
-
-            total_iops = float(read_stats.get("iops", 0)) + float(write_stats.get("iops", 0))
-            # fio bw 单位是 KB/s，转成 MB/s
-            total_bw_mbs = (
-                float(read_stats.get("bw", 0)) + float(write_stats.get("bw", 0))
-            ) / 1024.0
-
-            # 延迟：兼容 fio 2.x / 3.x
-            read_lat_us = self._extract_latency_us(read_stats)
-            write_lat_us = self._extract_latency_us(write_stats)
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read_lat_us={read_lat_us:.3f}, write_lat_us={write_lat_us:.3f}")
-
-            # 非零方取均值
-            nonzero = [x for x in (read_lat_us, write_lat_us) if x > 0]
-            avg_lat_ms = (sum(nonzero) / len(nonzero) / 1000.0) if nonzero else 0.0
-
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 解析结果:")
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   读IOPS: {read_stats.get('iops', 0):.2f}")
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   写IOPS: {write_stats.get('iops', 0):.2f}")
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   总IOPS: {total_iops:.2f}")
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   读带宽: {float(read_stats.get('bw', 0))/1024:.2f} MB/s")
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   写带宽: {float(write_stats.get('bw', 0))/1024:.2f} MB/s")
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   总带宽: {total_bw_mbs:.2f} MB/s")
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   读延迟: {read_lat_us/1000:.3f} ms")
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   写延迟: {write_lat_us/1000:.3f} ms")
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2]   平均延迟: {avg_lat_ms:.3f} ms")
-
+            # 1. 更新 TaskNode
             task_node = db.query(TaskNode).filter(TaskNode.id == task_node_id).first()
             if not task_node:
                 print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 警告: TaskNode不存在")
@@ -540,6 +556,7 @@ class TaskService:
             )
             print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 更新TaskNode数据库记录...")
 
+            # 2. 保存 IOPerformanceData
             perf = IOPerformanceData(
                 task_node_id=task_node_id,
                 iops=total_iops,
@@ -553,50 +570,95 @@ class TaskService:
                 write_lat=write_lat_us / 1000.0,
             )
             db.add(perf)
-            # 确保连接有效后再commit
-            try:
-                db.execute(text("SELECT 1"))
-                db.commit()
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 性能数据已保存到数据库, perf_id={perf.id}")
-            except Exception as commit_err:
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] commit失败: {commit_err!s}，尝试回滚...")
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                # 重新创建session
-                db = SessionLocal()
-                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 已重新创建session")
+            db.commit()
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 性能数据已保存到数据库, perf_id={perf.id}")
 
-            # 保存百分位数延迟数据
-            await self._save_percentile_data(db, task_id, task_node_id, job)
+            # 3. 保存百分位数延迟数据
+            self._save_percentile_data_in_session(db, task_id, task_node_id, job)
 
+            # 4. 发送WebSocket通知（使用同一session中加载的task_node）
             print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.3] 发送WebSocket性能更新...")
-            await self.socket_manager.broadcast_to_task(
+            # 注意：需要重新获取node_name，因为session可能已关闭
+            from models.node import Node
+            node_name = db.query(Node).filter(Node.id == task_node.node_id).first().node_name
+            asyncio.create_task(self.socket_manager.broadcast_to_task(
                 str(task_id),
                 "performance_update",
                 {
                     "task_node_id": task_node_id,
-                    "node_name": task_node.node.node_name,
+                    "node_name": node_name,
                     "iops": total_iops,
                     "bandwidth": total_bw_mbs,
                     "latency": avg_lat_ms,
                     "timestamp": datetime.utcnow().isoformat(),
                 },
-            )
+            ))
             print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.3] WebSocket通知已发送")
+
         except Exception as e:
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.ERROR] 解析FIO结果失败: {e!s}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.ERROR] 保存结果失败: {e!s}")
             import traceback
             traceback.print_exc()
             try:
                 db.rollback()
             except Exception:
                 pass
-            try:
-                await self._log_warning(db, task_id, f"解析FIO结果失败: {e!s}")
-            except Exception:
-                pass
+        finally:
+            db.close()
+
+    def _save_percentile_data_in_session(self, db: Session, task_id: int, task_node_id: int, job: dict):
+        """在已有session中保存百分位数数据"""
+        try:
+            for test_type in ("read", "write"):
+                stats = job.get(test_type, {}) or {}
+                lat_ns = stats.get("lat_ns", {})
+
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: stats keys={list(stats.keys())}")
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: lat_ns={lat_ns}, keys={list(lat_ns.keys()) if lat_ns else 'empty'}")
+
+                if not lat_ns:
+                    clat_ns = stats.get("clat_ns", {})
+                    if clat_ns:
+                        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: 使用 clat_ns 代替 lat_ns")
+                        lat_ns = clat_ns
+                    else:
+                        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: 无 lat_ns/clat_ns 数据，跳过百分位数保存")
+                        continue
+
+                perc_values = lat_ns.get("perc", [])
+                percentile_mapping = {
+                    "p1": 0, "p50": 1, "p75": 2, "p90": 3, "p95": 4,
+                    "p99": 5, "p999": 6, "p9999": 7, "p99999": 8
+                }
+
+                for name, idx in percentile_mapping.items():
+                    if idx < len(perc_values):
+                        latency_us = float(perc_values[idx])
+                        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type} {name}= {latency_us} us (idx={idx})")
+
+                        existing = db.query(TestResultPercentile).filter(
+                            TestResultPercentile.task_node_id == task_node_id,
+                            TestResultPercentile.percentile_name == name,
+                            TestResultPercentile.test_type == test_type
+                        ).first()
+
+                        if existing:
+                            existing.latency_us = latency_us
+                        else:
+                            percentile = TestResultPercentile(
+                                task_node_id=task_node_id,
+                                percentile_name=name,
+                                latency_us=latency_us,
+                                test_type=test_type
+                            )
+                            db.add(percentile)
+
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type} 百分位延迟已保存")
+
+            db.commit()
+        except Exception as e:
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] 保存百分位延迟失败: {e!s}")
+            db.rollback()
 
     @staticmethod
     def _aggregate_jobs(jobs: list) -> dict:

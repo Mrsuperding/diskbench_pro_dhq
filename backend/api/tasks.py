@@ -15,6 +15,7 @@ from schemas.task import (
     TaskUpdate,
     TaskResponse,
     TaskListResponse,
+    TaskNodeCreate,
     TaskNodeResponse,
     TaskStatusUpdate,
     TaskNodeStatusUpdate,

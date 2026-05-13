@@ -591,7 +591,7 @@ const loadTask = async () => {
 const loadLogs = async () => {
   try {
     const res = await tasksAPI.getTaskLogs(taskId.value)
-    logs.value = res.data || []
+    logs.value = Array.isArray(res) ? res : (res.data || [])
   } catch (e) {
     console.error('Load logs failed:', e)
   }
@@ -601,7 +601,7 @@ const loadLogs = async () => {
 const loadPercentiles = async () => {
   try {
     const res = await tasksAPI.getTaskPercentiles(taskId.value)
-    percentileData.value = res.data || []
+    percentileData.value = res || []
   } catch (e) {
     console.error('Load percentiles failed:', e)
   }

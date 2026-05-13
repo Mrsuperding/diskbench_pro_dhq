@@ -493,9 +493,13 @@ class TaskService:
             read_stats = job.get("read", {}) or {}
             write_stats = job.get("write", {}) or {}
 
-            # Debug: 打印 read stats 的 key
+            # Debug: 打印 read stats 的 key 和 lat 相关字段
             print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read_stats keys: {list(read_stats.keys())}")
             print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] write_stats keys: {list(write_stats.keys())}")
+            if "lat_ns" in read_stats:
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read lat_ns: {read_stats['lat_ns']}")
+            if "lat" in read_stats:
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.1] read lat: {read_stats['lat']}")
 
             total_iops = float(read_stats.get("iops", 0)) + float(write_stats.get("iops", 0))
             # fio bw 单位是 KB/s，转成 MB/s
@@ -640,11 +644,18 @@ class TaskService:
                 stats = job.get(test_type, {}) or {}
                 lat_ns = stats.get("lat_ns", {})
 
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: stats keys={list(stats.keys())}")
                 print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: lat_ns={lat_ns}, keys={list(lat_ns.keys()) if lat_ns else 'empty'}")
 
                 if not lat_ns:
-                    print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: 无 lat_ns 数据，跳过百分位数保存")
-                    continue
+                    # 尝试获取clat_ns
+                    clat_ns = stats.get("clat_ns", {})
+                    if clat_ns:
+                        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: 使用 clat_ns 代替 lat_ns")
+                        lat_ns = clat_ns
+                    else:
+                        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.4] {test_type}: 无 lat_ns/clat_ns 数据，跳过百分位数保存")
+                        continue
 
                 # fio 3.x 使用 lat_ns perc 数组，索引对应百分位
                 # fio 输出 perc 数组示例: [5000, 10000, 25000, 50000, 95000, 99000, 99900, 99990, 99999, 999999]

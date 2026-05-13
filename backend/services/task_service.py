@@ -554,9 +554,19 @@ class TaskService:
             )
             db.add(perf)
             # 确保连接有效后再commit
-            db.execute(text("SELECT 1"))
-            db.commit()
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 性能数据已保存到数据库, perf_id={perf.id}")
+            try:
+                db.execute(text("SELECT 1"))
+                db.commit()
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 性能数据已保存到数据库, perf_id={perf.id}")
+            except Exception as commit_err:
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] commit失败: {commit_err!s}，尝试回滚...")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                # 重新创建session
+                db = SessionLocal()
+                print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 已重新创建session")
 
             # 保存百分位数延迟数据
             await self._save_percentile_data(db, task_id, task_node_id, job)
@@ -579,7 +589,14 @@ class TaskService:
             print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.ERROR] 解析FIO结果失败: {e!s}")
             import traceback
             traceback.print_exc()
-            await self._log_warning(db, task_id, f"解析FIO结果失败: {e!s}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            try:
+                await self._log_warning(db, task_id, f"解析FIO结果失败: {e!s}")
+            except Exception:
+                pass
 
     @staticmethod
     def _aggregate_jobs(jobs: list) -> dict:

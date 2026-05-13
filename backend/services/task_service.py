@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from core.database import SessionLocal
 from models.task import Task, TaskNode, IOPerformanceData, IOStatData, TaskLog
@@ -548,6 +549,8 @@ class TaskService:
                 write_lat=write_lat_us / 1000.0,
             )
             db.add(perf)
+            # 确保连接有效后再commit
+            db.execute(text("SELECT 1"))
             db.commit()
             print(f"[Task {task_id}] [Node {task_node_id}] [2.8.5.2] 性能数据已保存到数据库, perf_id={perf.id}")
 

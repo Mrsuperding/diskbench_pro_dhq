@@ -283,11 +283,11 @@ class TaskService:
                 mount_point = partition_paths[0]
                 test_filename = mount_point
                 print(f"[Task {task_id}] [Node {task_node_id}] [2.6] 混合分区场景，使用: {test_filename}")
-            # 远端 JSON 输出文件（避免 stderr 污染）
+            # JSON 直接从 stdout 捕获，不再需要临时文件
             output_json = f"/tmp/diskbench_{task_id}_{task_node_id}_{uuid.uuid4().hex[:8]}.json"
             print(f"[Task {task_id}] [Node {task_node_id}] [2.6] 准备FIO测试命令...")
             print(f"[Task {task_id}] [Node {task_node_id}] [2.6]   测试文件: {test_filename}")
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.6]   JSON输出: {output_json}")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.6]   JSON从stdout捕获")
 
             # 获取 fio 路径（优先使用工具目录）
             fio_path = await ssh_service.get_tool_path("fio", ssh_service.tool_path)
@@ -407,8 +407,8 @@ class TaskService:
         执行 FIO 测试
         关键修复：
         - 超时 = runtime + 60s 缓冲（原来固定 3600s）
-        - fio JSON 输出写到远端文件，读文件而非 stdout（防 stderr 污染）
-        - 测试结束后清理测试文件和 JSON 文件
+        - fio JSON 直接从 stdout 捕获（不再写文件，避免警告混入）
+        - 测试结束后清理测试文件
         """
         print(f"[Task {task_id}] [Node {task_node_id}] [2.8.1] 执行FIO测试...")
         print(f"[Task {task_id}] [Node {task_node_id}] [2.8.1] FIO命令: {fio_command}")
@@ -422,31 +422,29 @@ class TaskService:
         result = await ssh_service.execute_command(fio_command, timeout=fio_timeout)
         print(f"[Task {task_id}] [Node {task_node_id}] [2.8.2] FIO命令执行完成!")
         print(f"[Task {task_id}] [Node {task_node_id}] [2.8.2] 结果: success={result.get('success')}")
+
+        # stderr 包含警告信息（如 clock setaffinity failed），可以忽略
         if result.get('stderr'):
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.2] stderr: {result.get('stderr')[:200]}")
+            stderr_preview = result.get('stderr')[:200]
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.2] stderr警告: {stderr_preview}")
 
         if not result.get("success"):
-            # 即使退出码非 0，也试着读一下 JSON 文件（fio 有时中途完成但退出码怪异）
+            # 即使退出码非 0，也尝试从 stdout 解析 JSON（fio 有时中途完成但退出码怪异）
             err = result.get("stderr") or result.get("error") or "unknown"
-            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.2] 警告: FIO退出码异常，尝试读取JSON文件...")
+            print(f"[Task {task_id}] [Node {task_node_id}] [2.8.2] 警告: FIO退出码异常，尝试从stdout解析...")
             await self._log_warning(db, task_id, f"FIO 命令退出异常: {err[:500]}")
 
-        # 读取远端 JSON 文件
-        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.3] 读取远端JSON输出文件...")
-        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.3] 文件路径: {output_json}")
-        cat_result = await ssh_service.execute_command(
-            f"cat {shlex.quote(output_json)}", timeout=30
-        )
-        fio_json_text = cat_result.get("stdout", "").strip() if cat_result.get("success") else ""
-        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.3] JSON文件读取: success={cat_result.get('success')}, 内容长度={len(fio_json_text)}")
+        # JSON 直接从 stdout 获取（不再读取文件，避免警告混入）
+        fio_json_text = result.get("stdout", "").strip()
+        print(f"[Task {task_id}] [Node {task_node_id}] [2.8.3] JSON从stdout获取: 长度={len(fio_json_text)}")
 
-        # 清理远端临时文件（JSON 输出 + 测试数据文件）
+        # 清理远端测试文件（不再有 JSON 文件需要清理）
         print(f"[Task {task_id}] [Node {task_node_id}] [2.8.4] 清理远端临时文件...")
         try:
-            cleanup_cmd = f"rm -f {shlex.quote(output_json)} {shlex.quote(test_filename)}"
+            cleanup_cmd = f"rm -f {shlex.quote(test_filename)}"
             print(f"[Task {task_id}] [Node {task_node_id}] [2.8.4] 清理命令: {cleanup_cmd}")
             await ssh_service.execute_command(
-                f"rm -f {shlex.quote(output_json)} {shlex.quote(test_filename)}",
+                f"rm -f {shlex.quote(test_filename)}",
                 timeout=30,
             )
             print(f"[Task {task_id}] [Node {task_node_id}] [2.8.4] 临时文件清理完成")

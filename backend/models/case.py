@@ -162,12 +162,8 @@ class TestCase(Base):
         if extra_options:
             cmd_parts.extend(extra_options)
 
-        # 关键修复：
-        # 1. 用 --output 指定文件，避免 stderr 警告（如 engine fallback、
-        #    参数 deprecated 警告）污染 JSON
-        # 2. 让 fio 把 JSON 直接写入文件，由调用方读取该文件
+        # JSON 格式输出，发送到 stdout（不写入文件，避免警告混入）
+        # stderr 的警告信息会被 SSH 分开捕获，不会污染 JSON
         cmd_parts.append("--output-format=json")
-        if output_file:
-            cmd_parts.append(f"--output={shlex.quote(output_file)}")
 
         return " ".join(cmd_parts)

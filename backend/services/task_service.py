@@ -15,6 +15,7 @@ from models.task_node_partition import TaskNodePartition
 from services.ssh_service import SSHService
 from services.init_write_service import InitWriteService
 from services.histogram_aggregator import HistogramAggregator
+from services.fio_log_monitor import FIOLogMonitor
 from services.baseline_comparator import BaselineComparator
 
 
@@ -234,11 +235,15 @@ class TaskService:
             output_json = f"/tmp/diskbench_{task_id}_{task_node_id}_{uuid.uuid4().hex[:8]}.json"
             fio_path = await ssh_service.get_tool_path("fio", ssh_service.tool_path)
 
+            # 日志前缀用于实时性能图表
+            log_prefix = f"/tmp/fio_{task_id}_{task_node_id}"
+
             fio_command = test_case.generate_fio_command(
                 filename=test_filename,
                 ioengine_override=chosen_engine,
                 output_file=output_json,
                 fio_path_override=fio_path,
+                log_prefix=log_prefix,
             )
             if ssh_service.tool_path:
                 lib_path = ssh_service.get_lib_path()
@@ -248,6 +253,12 @@ class TaskService:
             monitor_target = partition if partition else type('Partition', (), {'mount_point': partition_paths[0] if partition_paths else '/dev/sda'})()
             monitor_task = asyncio.create_task(
                 self._monitor_node_performance(task_id, task_node_id, ssh_service, monitor_target)
+            )
+
+            # FIO 日志实时监控
+            fio_log_monitor = FIOLogMonitor(self.socket_manager)
+            await fio_log_monitor.start_monitoring(
+                task_id, task_node_id, ssh_service, log_prefix
             )
 
             try:
@@ -263,6 +274,9 @@ class TaskService:
                     await monitor_task
                 except asyncio.CancelledError:
                     pass
+                # 停止 FIO 日志监控并清理日志文件
+                await fio_log_monitor.stop_monitoring(task_id, task_node_id)
+                await self._cleanup_fio_logs(ssh_service, task_id, task_node_id)
 
         except Exception as e:
             print(f"[Task {task_id}] [Node {task_node_id}] [ERROR] 节点任务异常: {e!s}")
@@ -566,6 +580,18 @@ class TaskService:
     async def _log_error(self, db, task_id, msg):
         await self._add_log(db, task_id, "error", msg)
 
+    async def _cleanup_fio_logs(self, ssh_service, task_id: int, task_node_id: int):
+        """清理 FIO 日志文件"""
+        log_prefix = f"/tmp/fio_{task_id}_{task_node_id}"
+        try:
+            await ssh_service.execute_command(
+                f"rm -f {log_prefix}_*.log",
+                timeout=10
+            )
+            print(f"[Task {task_id}] [Node {task_node_id}] FIO日志已清理")
+        except Exception as e:
+            print(f"[Task {task_id}] [Node {task_node_id}] 清理FIO日志失败: {e}")
+
     def stop_task(self, task_id: int) -> bool:
         if task_id in self.active_tasks:
             self.active_tasks[task_id]["should_stop"] = True
@@ -659,21 +685,85 @@ def _save_results_sync(
 
 
 def _extract_percentiles(job: dict, task_id: int, task_node_id: int) -> dict:
-    """从 fio job 数据中提取 read/write 的百分位延迟（微秒）"""
+    """
+    从 fio job 数据中提取 read/write 的百分位延迟（微秒）
+
+    FIO perc 数组索引对应关系 (基于 FIO 3.x):
+    perc[0]  = 1.00%
+    perc[1]  = 5.00%
+    perc[2]  = 10.00%
+    perc[3]  = 20.00%
+    perc[4]  = 30.00%
+    perc[5]  = 40.00%
+    perc[6]  = 50.00%  (P50)
+    perc[7]  = 60.00%
+    perc[8]  = 70.00%
+    perc[9]  = 75.00%  (P75)
+    perc[10] = 80.00%
+    perc[11] = 90.00%  (P90)
+    perc[12] = 95.00%  (P95)
+    perc[13] = 99.00%  (P99)
+    perc[14] = 99.50%
+    perc[15] = 99.90%  (P999)
+    perc[16] = 99.95%
+    perc[17] = 99.99%  (P9999)
+
+    注意：FIO 输出单位是纳秒(ns)，需要转换为微秒(us)
+    """
     result = {"read": {}, "write": {}}
+
+    # FIO perc 数组的正确索引映射
     perc_mapping = {
-        "p50": 1, "p75": 2, "p90": 3, "p95": 4,
-        "p99": 5, "p999": 6, "p9999": 7
+        "p50": 6,    # 50.00%
+        "p75": 9,    # 75.00%
+        "p90": 11,   # 90.00%
+        "p95": 12,   # 95.00%
+        "p99": 13,   # 99.00%
+        "p999": 15,  # 99.90%
+        "p9999": 17  # 99.99%
     }
+
     for test_type in ("read", "write"):
         stats = job.get(test_type, {}) or {}
-        for key in ("lat_ns", "clat_ns", "lat"):
-            lat_data = stats.get(key, {})
+
+        # 优先使用 clat_ns (completion latency), 其次 lat_ns
+        lat_data = None
+        for key in ("clat_ns", "lat_ns", "clat", "lat"):
+            if key in stats:
+                lat_data = stats[key]
+                break
+
+        if lat_data:
             perc_values = lat_data.get("perc", [])
-            if perc_values:
-                result[test_type]["max_lat_us"] = float(lat_data.get("max", 0))
+
+            if perc_values and len(perc_values) > 17:
+                # 提取最大延迟（纳秒转微秒）
+                result[test_type]["max_lat_us"] = float(lat_data.get("max", 0)) / 1000.0
+
+                # 提取各个百分位（纳秒转微秒）
                 for name, idx in perc_mapping.items():
                     if idx < len(perc_values):
-                        result[test_type][name] = float(perc_values[idx])
-                break
+                        result[test_type][name] = float(perc_values[idx]) / 1000.0
+                    else:
+                        result[test_type][name] = 0.0
+
+                print(f"[Task {task_id}] [Node {task_node_id}] {test_type} 百分位: "
+                      f"p50={result[test_type].get('p50', 0):.2f}us, "
+                      f"p99={result[test_type].get('p99', 0):.2f}us, "
+                      f"p9999={result[test_type].get('p9999', 0):.2f}us, "
+                      f"max={result[test_type].get('max_lat_us', 0):.2f}us")
+            else:
+                # 没有足够的 perc 数据
+                for name in perc_mapping:
+                    result[test_type][name] = 0.0
+                result[test_type]["max_lat_us"] = float(lat_data.get("max", 0)) / 1000.0 if lat_data else 0.0
+                print(f"[Task {task_id}] [Node {task_node_id}] {test_type} perc数据不足: "
+                      f"长度={len(perc_values) if perc_values else 0}, 最大延迟={result[test_type]['max_lat_us']:.2f}us")
+        else:
+            # 没有找到任何延迟数据
+            for name in perc_mapping:
+                result[test_type][name] = 0.0
+            result[test_type]["max_lat_us"] = 0.0
+            print(f"[Task {task_id}] [Node {task_node_id}] {test_type} 无延迟数据")
+
     return result

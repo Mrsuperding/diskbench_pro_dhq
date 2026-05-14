@@ -74,6 +74,7 @@ class TestCase(Base):
         output_file: Optional[str] = None,
         fio_path_override: Optional[str] = None,
         extra_options: Optional[list] = None,
+        log_prefix: Optional[str] = None,
     ) -> str:
         """
         生成 fio 命令（跨平台）
@@ -86,6 +87,8 @@ class TestCase(Base):
             output_file: 如果指定，fio 会把 JSON 输出写到该文件（避免 stderr 污染）
             fio_path_override: fio 可执行文件路径，默认使用系统 PATH 中的 fio
             extra_options: 额外的 fio 选项列表
+            log_prefix: 日志文件前缀路径，用于实时性能图表（如 /tmp/fio_123_456）
+                       如果指定，将启用每秒采样的 IOPS/带宽/延迟/直方图日志
 
         Returns:
             拼装好的 fio 命令字符串，所有用户输入均经过 shlex 转义防注入
@@ -163,6 +166,23 @@ class TestCase(Base):
         # 额外选项
         if extra_options:
             cmd_parts.extend(extra_options)
+
+        # 启用延迟百分位统计，用于P99/P999/P9999等数据采集
+        cmd_parts.append("--lat_percentiles=1")
+
+        # 实时性能图表参数（可选）
+        if log_prefix:
+            # 平均统计间隔为1秒
+            cmd_parts.append("--log_avg_msec=1000")
+            # 每秒记录 IOPS 日志
+            cmd_parts.append(f"--write_iops_log={log_prefix}_iops.log")
+            # 每秒记录带宽日志
+            cmd_parts.append(f"--write_bw_log={log_prefix}_bw.log")
+            # 每秒记录延迟日志（纳秒）
+            cmd_parts.append(f"--write_lat_log={log_prefix}_lat.log")
+            # 每秒记录延迟直方图日志
+            cmd_parts.append("--log_hist_msec=1000")
+            cmd_parts.append(f"--write_hist_log={log_prefix}_hist.log")
 
         # JSON 格式输出，发送到 stdout（不写入文件，避免警告混入）
         # stderr 的警告信息会被 SSH 分开捕获，不会污染 JSON

@@ -98,6 +98,8 @@ export const useTasksStore = defineStore('tasks', {
       this.loading = true
       try {
         const response = await tasksAPI.getTask(taskId)
+        console.log('fetchTask response:', response)
+        console.log('fetchTask response.test_case:', response?.test_case)
         this.currentTask = response
         return response
       } catch (error) {

@@ -16,18 +16,14 @@ class TestCase(Base):
     description = Column(Text, nullable=True)
     io_engine = Column(String(50), default="libaio", nullable=False)
     block_size = Column(String(20), default="4k", nullable=False)
-    queue_depth = Column(Integer, default=32, nullable=False)
+    queue_depth = Column(String(50), default="32", nullable=False)  # 支持逗号分隔如 "32,64,128"
     io_size = Column(String(20), default="1G", nullable=False)
     runtime = Column(Integer, default=60, nullable=False)
-    rw_mode = Column(
-        Enum("read", "write", "randread", "randwrite", "rw", "randrw"),
-        default="read",
-        nullable=False,
-    )
+    rw_mode = Column(String(50), default="read", nullable=False)  # 支持多模式逗号分隔如 "read,write"
     rw_ratio = Column(String(10), default="50/50", nullable=False)
     compression_ratio = Column(DECIMAL(3, 2), default=0.00, nullable=False)
     direct_io = Column(Boolean, default=True, nullable=False)
-    numjobs = Column(Integer, default=1, nullable=False)
+    numjobs = Column(String(50), default="1", nullable=False)  # 支持逗号分隔如 "1,4,8"
     time_based = Column(Boolean, default=True, nullable=False)
     verify = Column(String(20), nullable=True)
     verify_fatal = Column(Boolean, default=False, nullable=False)
@@ -106,15 +102,21 @@ class TestCase(Base):
         engine_q = shlex.quote(engine)
         bs_q = shlex.quote(self.block_size or "4k")
         size_q = shlex.quote(self.io_size or "1G")
-        rw_q = shlex.quote(self.rw_mode or "read")
+        # rw_mode 支持多模式逗号分隔，取第一个
+        rw_first = (self.rw_mode or "read").split(',')[0].strip()
+        rw_q = shlex.quote(rw_first)
         fio_binary = shlex.quote(fio_path_override) if fio_path_override else "fio"
+
+        # queue_depth 和 numjobs 支持逗号分隔多值，取第一个
+        qd_first = str(self.queue_depth or "32").split(',')[0].strip()
+        nj_first = str(self.numjobs or "1").split(',')[0].strip()
 
         cmd_parts = [
             fio_binary,
             f"--name={name_q}",
             f"--ioengine={engine_q}",
             f"--bs={bs_q}",
-            f"--iodepth={int(self.queue_depth or 1)}",
+            f"--iodepth={int(qd_first or 1)}",
             f"--size={size_q}",
             f"--runtime={int(self.runtime or 60)}",
             f"--rw={rw_q}",
@@ -141,7 +143,7 @@ class TestCase(Base):
         if self.direct_io and engine in ("libaio", "io_uring"):
             cmd_parts.append("--direct=1")
 
-        cmd_parts.append(f"--numjobs={int(self.numjobs or 1)}")
+        cmd_parts.append(f"--numjobs={int(nj_first or 1)}")
 
         if self.time_based:
             cmd_parts.append("--time_based")

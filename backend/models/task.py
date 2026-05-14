@@ -111,10 +111,14 @@ class TaskNode(Base):
 
 class IOPerformanceData(Base):
     __tablename__ = "io_performance_data"
-    
+
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     task_node_id = Column(Integer, ForeignKey("task_nodes.id"), nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    # 数据来源：fio（FIO测试结果）、monitor（性能监控采样）
+    source = Column(String(20), default="fio")
+    # 测试类型：read、write（仅 fio 结果有值，monitor 结果为 None）
+    test_type = Column(String(20), nullable=True)
     iops = Column(DECIMAL(10, 2), nullable=False)
     bandwidth = Column(DECIMAL(10, 2), nullable=False)  # MB/s
     latency = Column(DECIMAL(10, 2), nullable=False)  # ms
@@ -126,18 +130,29 @@ class IOPerformanceData(Base):
     write_lat = Column(DECIMAL(10, 2), default=0)  # ms
     cpu_usage = Column(DECIMAL(5, 2), default=0)  # %
     memory_usage = Column(DECIMAL(5, 2), default=0)  # %
-    
+    # 百分位延迟（微秒），仅 fio 结果有值
+    p50_lat_us = Column(DECIMAL(15, 2), default=0)
+    p75_lat_us = Column(DECIMAL(15, 2), default=0)
+    p90_lat_us = Column(DECIMAL(15, 2), default=0)
+    p95_lat_us = Column(DECIMAL(15, 2), default=0)
+    p99_lat_us = Column(DECIMAL(15, 2), default=0)
+    p999_lat_us = Column(DECIMAL(15, 2), default=0)
+    p9999_lat_us = Column(DECIMAL(15, 2), default=0)
+    max_lat_us = Column(DECIMAL(15, 2), default=0)  # 最大延迟（微秒）
+
     # 关系
     task_node = relationship("TaskNode", back_populates="performance_data")
-    
+
     def __repr__(self):
-        return f"<IOPerformanceData(id={self.id}, task_node_id={self.task_node_id}, timestamp={self.timestamp})>"
-    
+        return f"<IOPerformanceData(id={self.id}, task_node_id={self.task_node_id}, source={self.source})>"
+
     def to_dict(self):
         return {
             "id": self.id,
             "task_node_id": self.task_node_id,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "source": self.source,
+            "test_type": self.test_type,
             "iops": float(self.iops) if self.iops else 0,
             "bandwidth": float(self.bandwidth) if self.bandwidth else 0,
             "latency": float(self.latency) if self.latency else 0,
@@ -148,7 +163,15 @@ class IOPerformanceData(Base):
             "read_lat": float(self.read_lat) if self.read_lat else 0,
             "write_lat": float(self.write_lat) if self.write_lat else 0,
             "cpu_usage": float(self.cpu_usage) if self.cpu_usage else 0,
-            "memory_usage": float(self.memory_usage) if self.memory_usage else 0
+            "memory_usage": float(self.memory_usage) if self.memory_usage else 0,
+            "p50_lat_us": float(self.p50_lat_us) if self.p50_lat_us else 0,
+            "p75_lat_us": float(self.p75_lat_us) if self.p75_lat_us else 0,
+            "p90_lat_us": float(self.p90_lat_us) if self.p90_lat_us else 0,
+            "p95_lat_us": float(self.p95_lat_us) if self.p95_lat_us else 0,
+            "p99_lat_us": float(self.p99_lat_us) if self.p99_lat_us else 0,
+            "p999_lat_us": float(self.p999_lat_us) if self.p999_lat_us else 0,
+            "p9999_lat_us": float(self.p9999_lat_us) if self.p9999_lat_us else 0,
+            "max_lat_us": float(self.max_lat_us) if self.max_lat_us else 0,
         }
 
 class IOStatData(Base):

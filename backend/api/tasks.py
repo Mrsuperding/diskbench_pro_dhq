@@ -201,45 +201,42 @@ async def create_task(
 
     return db_task.to_dict()
 
-@router.put("/{task_id}", response_model=TaskResponse)
-async def update_task(
+@router.put("/{task_id}/case", response_model=TaskResponse)
+async def update_task_case(
     task_id: int,
-    task_update: TaskUpdate,
+    case_update: dict,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """更新任务"""
+    """更新任务的测试用例配置"""
+    print(f"[update_task_case] task_id={task_id}, case_update={case_update}")
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="任务不存在"
-        )
-    
-    # 权限检查
+        raise HTTPException(status_code=404, detail="任务不存在")
+
     if current_user.role != "admin" and task.created_by != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="无权修改此任务"
-        )
-    
-    # 检查名称冲突（如果修改了名称）
-    if task_update.task_name and task_update.task_name != task.task_name:
-        if db.query(Task).filter(Task.task_name == task_update.task_name).first():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="任务名称已存在"
-            )
-    
-    # 更新字段
-    update_data = task_update.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(task, field, value)
-    
+        raise HTTPException(status_code=403, detail="无权修改此任务")
+
+    if not task.test_case:
+        raise HTTPException(status_code=404, detail="任务没有关联测试用例")
+
+    # 更新 TestCase 字段
+    allowed_fields = ["io_engine", "block_size", "rw_mode", "rw_ratio", "queue_depth",
+                      "io_size", "runtime", "numjobs", "time_based", "direct_io",
+                      "verify", "compression_ratio"]
+    for field, value in case_update.items():
+        if field in allowed_fields and hasattr(task.test_case, field):
+            print(f"[update_task_case] Setting {field} = {repr(value)}")
+            setattr(task.test_case, field, value)
+
     db.commit()
     db.refresh(task)
-
-    return task.to_dict()
+    # 打印更新后的值
+    tc = task.test_case
+    print(f"[update_task_case] After refresh - rw_mode={repr(tc.rw_mode)}, block_size={repr(tc.block_size)}")
+    result_dict = task.to_dict()
+    print(f"[update_task_case] test_case in response: {result_dict.get('test_case')}")
+    return result_dict
 
 @router.delete("/{task_id}")
 async def delete_task(
@@ -597,19 +594,6 @@ async def add_task_node(
         db.refresh(db_task_node)
         return [db_task_node.to_dict()]
 
-    # 检查是否已存在（同一节点）
-    existing = db.query(TaskNode).filter(
-        TaskNode.task_id == task_id,
-        TaskNode.node_id == task_node_data.node_id
-    ).first()
-
-    if existing:
-        # 更新已有节点的分区
-        existing.partitions = ','.join(partition_paths)
-        db.commit()
-        db.refresh(existing)
-        return [existing.to_dict()]
-
     # 查找或创建一个占位分区（用于关联）
     placeholder_partition = db.query(NodePartition).filter(
         NodePartition.node_id == task_node_data.node_id,
@@ -631,7 +615,7 @@ async def add_task_node(
         task_id=task_id,
         node_id=task_node_data.node_id,
         partition_id=placeholder_partition.id,
-        partitions=','.join(partition_paths)
+        partitions=task_node_data.partition_path or ''
     )
     db.add(db_task_node)
     db.commit()
@@ -639,10 +623,10 @@ async def add_task_node(
 
     return [db_task_node.to_dict()]
 
-@router.delete("/{task_id}/nodes/{node_id}")
+@router.delete("/{task_id}/nodes/{task_node_id}")
 async def remove_task_node(
     task_id: int,
-    node_id: int,
+    task_node_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -653,32 +637,30 @@ async def remove_task_node(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="任务不存在"
         )
-    
-    # 权限检查
+
     if current_user.role != "admin" and task.created_by != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="无权修改此任务"
         )
-    
-    # 检查任务状态
+
     if task.status == "running":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="无法修改正在运行的任务"
         )
-    
+
     task_node = db.query(TaskNode).filter(
-        TaskNode.task_id == task_id,
-        TaskNode.node_id == node_id
+        TaskNode.id == task_node_id,
+        TaskNode.task_id == task_id
     ).first()
-    
+
     if not task_node:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="任务节点不存在"
         )
-    
+
     db.delete(task_node)
     db.commit()
 
@@ -832,13 +814,72 @@ async def get_task_percentiles(
             detail="无权访问此任务"
         )
 
-    from models.task_node_partition import TestResultPercentile
+    # 按 task_node_id 聚合性能数据
+    # iops/bandwidth 求和，latency 求平均，p99/p999/p9999/max 取最大值
+    from sqlalchemy import func
+    agg = db.query(
+        IOPerformanceData.task_node_id,
+        func.sum(IOPerformanceData.iops).label("total_iops"),
+        func.sum(IOPerformanceData.bandwidth).label("total_bw"),
+        func.sum(IOPerformanceData.read_iops).label("read_iops"),
+        func.sum(IOPerformanceData.write_iops).label("write_iops"),
+        func.sum(IOPerformanceData.read_bw).label("read_bw"),
+        func.sum(IOPerformanceData.write_bw).label("write_bw"),
+        func.avg(IOPerformanceData.latency).label("avg_latency"),
+        func.avg(IOPerformanceData.read_lat).label("avg_read_lat"),
+        func.avg(IOPerformanceData.write_lat).label("avg_write_lat"),
+        func.max(IOPerformanceData.p99_lat_us).label("p99_lat_us"),
+        func.max(IOPerformanceData.p999_lat_us).label("p999_lat_us"),
+        func.max(IOPerformanceData.p9999_lat_us).label("p9999_lat_us"),
+        func.max(IOPerformanceData.max_lat_us).label("max_lat_us"),
+    ).join(TaskNode).filter(
+        TaskNode.task_id == task_id,
+        IOPerformanceData.source == "fio"
+    ).group_by(IOPerformanceData.task_node_id).all()
 
-    percentiles = db.query(TestResultPercentile).join(TaskNode).filter(
-        TaskNode.task_id == task_id
-    ).order_by(TestResultPercentile.test_type, TestResultPercentile.percentile_name).all()
+    result = []
+    for row in agg:
+        tn = db.query(TaskNode).filter(TaskNode.id == row.task_node_id).first()
+        if not tn:
+            continue
+        node = tn.node
+        partitions = tn.partitions or ""
+        partition_count = len([p for p in partitions.split(',') if p.strip()]) or 1
 
-    return [p.to_dict() for p in percentiles]
+        # 生成模型名称: {节点数}VM_{卷数量}VOL_{块大小}K_{读写模式}_{队列深度}d_{线程数量}n_{1或0}t
+        tc = task.test_case
+        block_size = tc.block_size or "4k"
+        rw_mode = tc.rw_mode or "read"
+        # queue_depth 和 numjobs 可能是逗号分隔字符串，取第一个值
+        qd_str = str(tc.queue_depth or "1").split(',')[0].strip()
+        nj_str = str(tc.numjobs or "1").split(',')[0].strip()
+        queue_depth = int(qd_str) if qd_str else 1
+        numjobs = int(nj_str) if nj_str else 1
+        time_based = 1 if tc.time_based else 0
+        model_name = f"{1}VM_{partition_count}VOL_{block_size}_{rw_mode}_{queue_depth}d_{numjobs}n_{time_based}t"
+
+        result.append({
+            "task_node_id": row.task_node_id,
+            "model_name": model_name,
+            "node_name": node.node_name if node else "",
+            "node_host": node.host if node else "",
+            "partitions": partitions,
+            "total_iops": float(row.total_iops or 0),
+            "total_bw": float(row.total_bw or 0),
+            "read_iops": float(row.read_iops or 0),
+            "write_iops": float(row.write_iops or 0),
+            "read_bw": float(row.read_bw or 0),
+            "write_bw": float(row.write_bw or 0),
+            "avg_latency": float(row.avg_latency or 0),
+            "avg_read_lat": float(row.avg_read_lat or 0),
+            "avg_write_lat": float(row.avg_write_lat or 0),
+            "p99_lat_us": float(row.p99_lat_us or 0),
+            "p999_lat_us": float(row.p999_lat_us or 0),
+            "p9999_lat_us": float(row.p9999_lat_us or 0),
+            "max_lat_us": float(row.max_lat_us or 0),
+        })
+
+    return result
 
 
 # 日志相关接口

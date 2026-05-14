@@ -150,7 +150,7 @@
           </el-button>
         </div>
         <el-table :data="taskNodes" border class="node-table" v-if="taskNodes.length > 0">
-          <el-table-column prop="id" label="ID" width="60" />
+          <el-table-column prop="id" label="ID" width="80" />
           <el-table-column label="节点" min-width="150">
             <template #default="{ row }">
               <el-button type="text" class="!text-white font-medium !px-0" @click="handleEditNodePartitions(row)">
@@ -159,28 +159,15 @@
               <div class="text-xs text-slate-400">{{ row.node?.host || '' }}</div>
             </template>
           </el-table-column>
-          <el-table-column label="分区" min-width="150">
+          <el-table-column label="分区" min-width="200">
             <template #default="{ row }">
               <span>{{ row.partitions || row.partition?.mount_point || `分区 ${row.partition_id}` }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="状态" width="100">
+          <el-table-column label="操作" width="240" fixed="right">
             <template #default="{ row }">
-              <span :class="['node-status', `status-${row.status}`]">{{ getStatusText(row.status) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="IOPS" width="100">
-            <template #default="{ row }">{{ formatNumber(row.iops) }}</template>
-          </el-table-column>
-          <el-table-column label="带宽" width="100">
-            <template #default="{ row }">{{ formatBw(row.bandwidth) }}</template>
-          </el-table-column>
-          <el-table-column label="延迟" width="100">
-            <template #default="{ row }">{{ formatLatency(row.latency) }}</template>
-          </el-table-column>
-          <el-table-column label="操作" width="80" fixed="right">
-            <template #default="{ row }">
-              <el-button type="danger" size="small" @click="handleRemoveNode(row)">移除</el-button>
+              <el-button size="small" @click="handleCloneNode(row)">克隆</el-button>
+              <el-button size="small" type="danger" @click="handleRemoveNode(row)">移除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -221,19 +208,17 @@
               </div>
               <div class="case-row">
                 <span class="case-label">块大小</span>
-                <div class="multi-values">
-                  <span v-for="bs in tc.block_sizes" :key="bs" class="value-tag">{{ bs }}</span>
-                </div>
+                <span class="case-value">{{ tc.block_size || '4k' }}</span>
               </div>
               <div class="case-row">
                 <span class="case-label">IO模式</span>
                 <div class="multi-values">
-                  <span v-for="rw in tc.rw_modes" :key="rw" class="value-tag mode">{{ getRwModeText(rw) }}</span>
+                  <span v-for="rw in (tc.rw_mode ? tc.rw_mode.split(',') : ['read'])" :key="rw" class="value-tag mode">{{ getRwModeText(rw) }}</span>
                 </div>
               </div>
               <div class="case-row">
                 <span class="case-label">队列深度</span>
-                <span class="case-value">{{ tc.queue_depth || 32 }}</span>
+                <span class="case-value">{{ tc.queue_depth || '32' }}</span>
               </div>
               <div class="case-row">
                 <span class="case-label">IO大小</span>
@@ -244,8 +229,8 @@
                 <span class="case-value">{{ tc.runtime || 60 }}秒</span>
               </div>
               <div class="case-row">
-                <span class="case-label">Numjobs</span>
-                <span class="case-value">{{ tc.numjobs || 1 }}</span>
+                <span class="case-label">线程数</span>
+                <span class="case-value">{{ tc.numjobs || '1' }}</span>
               </div>
             </div>
           </div>
@@ -261,7 +246,7 @@
       <div v-show="activeTab === 'percentiles'" class="tab-panel">
         <div class="section-header">
           <div class="section-title">
-            <h3>百分位延迟</h3>
+            <h3>性能详情</h3>
             <span class="node-count">共 {{ percentileData.length }} 条数据</span>
           </div>
           <el-button @click="loadPercentiles">
@@ -273,33 +258,39 @@
           <table>
             <thead>
               <tr>
+                <th>用例IO模型</th>
                 <th>节点</th>
-                <th>类型</th>
-                <th>p1</th>
-                <th>p50</th>
-                <th>p75</th>
-                <th>p90</th>
-                <th>p95</th>
-                <th>p99</th>
-                <th>p999</th>
-                <th>p9999</th>
+                <th>读IOPS</th>
+                <th>写IOPS</th>
+                <th>总IOPS</th>
+                <th>读带宽(MB/s)</th>
+                <th>写带宽(MB/s)</th>
+                <th>总带宽(MB/s)</th>
+                <th>读延迟(ms)</th>
+                <th>写延迟(ms)</th>
+                <th>平均延迟(ms)</th>
+                <th>P99(us)</th>
+                <th>P9999(us)</th>
+                <th>最大延迟(us)</th>
               </tr>
             </thead>
             <tbody>
-              <template v-for="nodePercentiles in groupedPercentiles" :key="nodePercentiles.node_id">
-                <tr v-for="(item, idx) in nodePercentiles.data" :key="idx">
-                  <td v-if="idx === 0" :rowspan="nodePercentiles.data.length">{{ nodePercentiles.node_name }}</td>
-                  <td>{{ item.test_type }}</td>
-                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p1')) }}</td>
-                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p50')) }}</td>
-                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p75')) }}</td>
-                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p90')) }}</td>
-                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p95')) }}</td>
-                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p99')) }}</td>
-                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p999')) }}</td>
-                  <td>{{ formatLatency(getPercentile(item, item.test_type, 'p9999')) }}</td>
-                </tr>
-              </template>
+              <tr v-for="item in percentileData" :key="item.task_node_id">
+                <td>{{ item.model_name }}</td>
+                <td>{{ item.node_name }}</td>
+                <td>{{ formatNumber(item.read_iops) }}</td>
+                <td>{{ formatNumber(item.write_iops) }}</td>
+                <td>{{ formatNumber(item.total_iops) }}</td>
+                <td>{{ item.read_bw ? item.read_bw.toFixed(2) : '-' }}</td>
+                <td>{{ item.write_bw ? item.write_bw.toFixed(2) : '-' }}</td>
+                <td>{{ item.total_bw ? item.total_bw.toFixed(2) : '-' }}</td>
+                <td>{{ item.avg_read_lat ? item.avg_read_lat.toFixed(2) : '-' }}</td>
+                <td>{{ item.avg_write_lat ? item.avg_write_lat.toFixed(2) : '-' }}</td>
+                <td>{{ item.avg_latency ? item.avg_latency.toFixed(2) : '-' }}</td>
+                <td>{{ item.p99_lat_us ? Number(item.p99_lat_us).toFixed(2) : '-' }}</td>
+                <td>{{ item.p9999_lat_us ? Number(item.p9999_lat_us).toFixed(2) : '-' }}</td>
+                <td>{{ item.max_lat_us ? Number(item.max_lat_us).toFixed(2) : '-' }}</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -399,20 +390,9 @@
             <el-option label="io_uring" value="io_uring" />
           </el-select>
         </el-form-item>
-        <el-form-item label="块大小 (多选)">
-          <el-select v-model="caseForm.block_sizes" multiple placeholder="选择块大小" class="w-full">
-            <el-option label="4K" value="4k" />
-            <el-option label="8K" value="8k" />
-            <el-option label="16K" value="16k" />
-            <el-option label="32K" value="32k" />
-            <el-option label="64K" value="64k" />
-            <el-option label="128K" value="128k" />
-            <el-option label="256K" value="256k" />
-            <el-option label="512K" value="512k" />
-            <el-option label="1M" value="1M" />
-            <el-option label="2M" value="2M" />
-            <el-option label="4M" value="4M" />
-          </el-select>
+        <el-form-item label="块大小">
+          <el-input v-model="caseForm.block_sizes" placeholder="逗号分隔，如: 4k,8k,16k" />
+          <div class="form-tip">多个块大小用逗号分隔</div>
         </el-form-item>
         <el-form-item label="IO模式 (多选)">
           <el-select v-model="caseForm.rw_modes" multiple placeholder="选择IO模式" class="w-full">
@@ -425,7 +405,8 @@
           </el-select>
         </el-form-item>
         <el-form-item label="队列深度">
-          <el-input-number v-model="caseForm.queue_depth" :min="1" :max="256" />
+          <el-input v-model="caseForm.queue_depth" placeholder="逗号分隔，如: 32,64,128" />
+          <div class="form-tip">多个队列深度用逗号分隔</div>
         </el-form-item>
         <el-form-item label="IO大小">
           <el-input v-model="caseForm.io_size" placeholder="如: 1G, 10G" />
@@ -433,8 +414,9 @@
         <el-form-item label="运行时长(秒)">
           <el-input-number v-model="caseForm.runtime" :min="1" />
         </el-form-item>
-        <el-form-item label="Numjobs">
-          <el-input-number v-model="caseForm.numjobs" :min="1" :max="32" />
+        <el-form-item label="线程数">
+          <el-input v-model="caseForm.numjobs" placeholder="逗号分隔，如: 1,4,8" />
+          <div class="form-tip">多个线程数用逗号分隔</div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -532,12 +514,12 @@ const addCaseVisible = ref(false)
 const editingCaseIndex = ref(-1)
 const caseForm = ref({
   io_engine: 'libaio',
-  block_sizes: ['4k'],
+  block_sizes: '4k',
   rw_modes: ['read'],
-  queue_depth: 32,
+  queue_depth: '32',
   io_size: '1G',
   runtime: 60,
-  numjobs: 1
+  numjobs: '1'
 })
 
 const statusClass = computed(() => ({
@@ -550,7 +532,7 @@ const statusClass = computed(() => ({
 const formatTime = (t) => t ? new Date(t).toLocaleString('zh-CN') : '-'
 const formatNumber = (n) => n ? new Intl.NumberFormat().format(Math.round(n)) : '0'
 const formatBw = (mbs) => mbs ? `${(mbs / 1024).toFixed(2)} GB/s` : '0 GB/s'
-const formatLatency = (ms) => ms ? `${ms.toFixed(2)} ms` : '0 ms'
+const formatLatency = (ms) => ms && ms !== '-' ? `${Number(ms).toFixed(2)} ms` : '0 ms'
 const formatDuration = (s) => {
   if (!s) return '0秒'
   const h = Math.floor(s / 3600)
@@ -575,15 +557,23 @@ const loadTask = async () => {
   // 从 task.test_case 解析用例配置
   if (tasksStore.currentTask?.test_case) {
     const tc = tasksStore.currentTask.test_case
+    console.log('loadTask tc (from store):', tc)
+    console.log('loadTask tc.rw_mode:', tc.rw_mode)
+    console.log('loadTask tc.block_size:', tc.block_size)
+    // rw_mode 可能是逗号分隔字符串，需要拆分为数组
+    const rwModeValue = tc.rw_mode || 'read'
+    const rwModesArray = rwModeValue.includes(',') ? rwModeValue.split(',') : [rwModeValue]
+    console.log('loadTask rwModesArray:', rwModesArray)
     taskCases.value = [{
-      io_engine: tc.io_engine,
-      block_sizes: tc.block_size ? [tc.block_size] : ['4k'],
-      rw_modes: tc.rw_mode ? [tc.rw_mode] : ['read'],
-      queue_depth: tc.queue_depth,
-      io_size: tc.io_size,
-      runtime: tc.runtime,
-      numjobs: tc.numjobs
+      io_engine: tc.io_engine || 'libaio',
+      block_sizes: tc.block_size || '4k',
+      rw_modes: rwModesArray,
+      queue_depth: String(tc.queue_depth || '32'),
+      io_size: tc.io_size || '1G',
+      runtime: tc.runtime || 60,
+      numjobs: String(tc.numjobs || '1')
     }]
+    console.log('loadTask taskCases.value:', JSON.stringify(taskCases.value))
   }
 }
 
@@ -597,54 +587,21 @@ const loadLogs = async () => {
   }
 }
 
-// 加载百分位数据
+// 根据 task_node_id 获取节点名称
+const getNodeName = (taskNodeId) => {
+  const tn = taskNodes.value.find(tn => tn.id === taskNodeId)
+  return tn?.node?.name || tn?.node?.host || `节点 ${taskNodeId}`
+}
+
+// 加载性能数据（聚合后的数据）
 const loadPercentiles = async () => {
   try {
     const res = await tasksAPI.getTaskPercentiles(taskId.value)
     percentileData.value = res || []
   } catch (e) {
-    console.error('Load percentiles failed:', e)
+    console.error('Load performance data failed:', e)
   }
 }
-
-// 获取指定百分位值
-const getPercentile = (nodeData, testType, percentileName) => {
-  const found = percentileData.value.find(p =>
-    p.task_node_id === nodeData.task_node_id &&
-    p.test_type === testType &&
-    p.percentile_name === percentileName
-  )
-  return found ? found.latency_us : '-'
-}
-
-// 按节点分组百分位数据
-const groupedPercentiles = computed(() => {
-  const grouped = {}
-  percentileData.value.forEach(p => {
-    if (!grouped[p.task_node_id]) {
-      const taskNode = taskNodes.value.find(tn => tn.id === p.task_node_id)
-      grouped[p.task_node_id] = {
-        node_id: p.task_node_id,
-        node_name: taskNode?.node?.name || `节点 ${p.task_node_id}`,
-        data: []
-      }
-    }
-    // 检查是否已添加该 test_type 的数据
-    const existingEntry = grouped[p.task_node_id].data.find(d => d.test_type === p.test_type)
-    if (existingEntry) {
-      // 更新已有的百分位数据
-      Object.assign(existingEntry, { [p.percentile_name]: p.latency_us })
-    } else {
-      // 添加新的百分位数据行
-      grouped[p.task_node_id].data.push({
-        task_node_id: p.task_node_id,
-        test_type: p.test_type,
-        [p.percentile_name]: p.latency_us
-      })
-    }
-  })
-  return Object.values(grouped)
-})
 
 // 加载可用节点
 const loadAvailableNodes = async () => {
@@ -684,10 +641,23 @@ const handleAddNode = async () => {
 }
 
 // 移除节点
+const handleCloneNode = async (node) => {
+  try {
+    await tasksAPI.addTaskNode(taskId.value, {
+      node_id: node.node_id,
+      partitions: node.partitions || ''
+    })
+    ElMessage.success('节点已克隆')
+    await loadTask()
+  } catch (e) {
+    ElMessage.error('克隆失败')
+  }
+}
+
 const handleRemoveNode = async (node) => {
   try {
     await ElMessageBox.confirm('确定移除该节点？', '确认', { type: 'warning' })
-    await tasksAPI.removeTaskNode(taskId.value, node.node_id)
+    await tasksAPI.removeTaskNode(taskId.value, node.id)
     ElMessage.success('节点已移除')
     await loadTask()
   } catch (e) {
@@ -735,12 +705,12 @@ const showAddCaseDialog = () => {
   editingCaseIndex.value = -1
   caseForm.value = {
     io_engine: 'libaio',
-    block_sizes: ['4k'],
+    block_sizes: '4k',
     rw_modes: ['read'],
-    queue_depth: 32,
+    queue_depth: '32',
     io_size: '1G',
     runtime: 60,
-    numjobs: 1
+    numjobs: '1'
   }
   addCaseVisible.value = true
 }
@@ -748,7 +718,18 @@ const showAddCaseDialog = () => {
 // 编辑用例配置
 const editCaseConfig = (tc) => {
   editingCaseIndex.value = taskCases.value.indexOf(tc)
-  caseForm.value = { ...tc }
+  // rw_mode 可能是逗号分隔字符串或多选数组，需要统一处理
+  const rwModeValue = tc.rw_mode || tc.rw_modes?.[0] || 'read'
+  const rwModesArray = typeof rwModeValue === 'string' ? rwModeValue.split(',') : (Array.isArray(rwModeValue) ? rwModeValue : [rwModeValue])
+  caseForm.value = {
+    io_engine: tc.io_engine || 'libaio',
+    block_sizes: tc.block_sizes || tc.block_size || '4k',
+    rw_modes: rwModesArray,
+    queue_depth: tc.queue_depth || '32',
+    io_size: tc.io_size || '1G',
+    runtime: tc.runtime || 60,
+    numjobs: tc.numjobs || '1'
+  }
   addCaseVisible.value = true
 }
 
@@ -760,22 +741,33 @@ const removeCaseConfig = (index) => {
 
 // 保存用例配置
 const handleSaveCase = async () => {
-  if (!caseForm.value.block_sizes?.length) {
-    ElMessage.warning('请至少选择一个块大小')
-    return
-  }
-  if (!caseForm.value.rw_modes?.length) {
-    ElMessage.warning('请至少选择一个IO模式')
-    return
-  }
-  if (editingCaseIndex.value >= 0) {
-    taskCases.value[editingCaseIndex.value] = { ...caseForm.value }
-    ElMessage.success('用例配置已更新')
-  } else {
-    taskCases.value.push({ ...caseForm.value })
-    ElMessage.success('用例配置已添加')
-  }
   addCaseVisible.value = false
+
+  // 持久化到后端
+  try {
+    // rw_modes 是多选数组，转为逗号分隔字符串
+    console.log('caseForm.value before save:', JSON.stringify(caseForm.value))
+    const rwModesValue = Array.isArray(caseForm.value.rw_modes)
+      ? caseForm.value.rw_modes.join(',')
+      : caseForm.value.rw_modes
+    console.log('rwModesValue:', rwModesValue)
+    const caseData = {
+      io_engine: caseForm.value.io_engine,
+      block_size: caseForm.value.block_sizes,
+      rw_mode: rwModesValue,
+      queue_depth: caseForm.value.queue_depth,
+      io_size: caseForm.value.io_size,
+      runtime: caseForm.value.runtime,
+      numjobs: caseForm.value.numjobs
+    }
+    console.log('Saving case data:', caseData)
+    await tasksAPI.updateTaskCase(taskId.value, caseData)
+    await loadTask()
+    ElMessage.success('用例配置已保存')
+  } catch (e) {
+    console.error('Save case failed:', e)
+    ElMessage.error('保存失败')
+  }
 }
 
 // 基础操作

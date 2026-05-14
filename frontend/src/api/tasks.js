@@ -21,6 +21,11 @@ export const tasksAPI = {
     return api.put(`/tasks/${taskId}`, data)
   },
 
+  // 更新任务用例
+  updateTaskCase(taskId, data) {
+    return api.put(`/tasks/${taskId}/case`, data)
+  },
+
   // 删除任务
   deleteTask(taskId) {
     return api.delete(`/tasks/${taskId}`)
@@ -62,8 +67,8 @@ export const tasksAPI = {
   },
 
   // 从任务移除节点
-  removeTaskNode(taskId, nodeId) {
-    return api.delete(`/tasks/${taskId}/nodes/${nodeId}`)
+  removeTaskNode(taskId, taskNodeId) {
+    return api.delete(`/tasks/${taskId}/nodes/${taskNodeId}`)
   },
 
   // 克隆任务
